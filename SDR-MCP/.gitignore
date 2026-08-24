@@ -1,0 +1,3 @@
+# Built Python distributions are binary release artifacts. Build them from source
+# when needed instead of committing them to the repository.
+dist/
