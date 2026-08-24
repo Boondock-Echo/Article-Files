@@ -332,7 +332,8 @@ def test_dashboard_exposes_rf_operations_data(tmp_path, monkeypatch):
     assert b"Quick Start" in page
     assert b"Favorite stations" in page
     assert b"parseFrequency" in page
-    assert b"145800 kHz" in page
+    assert b"FREQUENCY_MULTIPLIERS" in page
+    assert b"Hz" in page and b"kHz" in page and b"MHz" in page
     assert b"Digital Modes" in page
     assert b"Decode again" in page
     assert b"Try FT8 on 20 m" in page
@@ -765,3 +766,55 @@ def test_dashboard_responsive_markup_primitives_and_mobile_tables():
     for table_body in ("memoryRows", "scheduleRows", "bandJobRows", "artifactRows", "jobRows", "fmStationRows", "sstvJobRows"):
         assert f"'{table_body}'" in script
     assert "b.classList.add('destructive')" in script
+
+
+def test_dashboard_frequency_helpers_convert_validate_and_format_boundaries():
+    """The browser helpers preserve integer-Hz API precision for every display unit."""
+    import subprocess
+
+    script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
+        encoding="utf-8"
+    )
+    helpers = script[script.index("const FREQUENCY_MULTIPLIERS"):
+                     script.index("const frequencyFields")]
+    program = helpers + """
+const cases = [
+  parseFrequencyInput('9000', 'hz'),
+  parseFrequencyInput('9', 'khz'),
+  parseFrequencyInput('0.009', 'mhz'),
+  parseFrequencyInput('100.1', 'mhz'),
+  parseFrequencyInput('14.074001', 'mhz'),
+  parseFrequencyInput('260', 'mhz'),
+  formatFrequency(100100000),
+  formatFrequency(14074001),
+];
+const invalid = [];
+for (const args of [['8.999','khz'], ['260.000001','mhz'], ['100.1234567','mhz'], ['oops','mhz']]) {
+  try { parseFrequencyInput(...args); invalid.push(false) } catch (_) { invalid.push(true) }
+}
+console.log(JSON.stringify({cases, invalid}));
+"""
+    result = subprocess.run(
+        ["node", "-e", program], check=True, text=True, capture_output=True
+    )
+    assert json.loads(result.stdout) == {
+        "cases": [9000, 9000, 9000, 100100000, 14074001, 260000000,
+                  "100.1 MHz", "14.074001 MHz"],
+        "invalid": [True, True, True, True],
+    }
+
+
+def test_dashboard_frequency_controls_share_memory_recall_and_integer_hz_payloads():
+    script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "function parseFrequencyInput" in script
+    assert "function formatFrequency" in script
+    assert "selectedFrequencyHz=m.frequency_hz" in script
+    assert "['frequency','audioFrequency','fmFrequency','digitalFrequency','sstvFrequency','bandStart']" in script
+    assert "frequency_hz:frequencyValue('fmFrequency')" in script
+    assert "center_frequency_hz:frequencyValue('frequency')" in script
+    assert "start_frequency_hz:frequencyValue('bandStart')" in script
+    assert "Stop frequency must be greater than start frequency" in script
+    assert "outside the selected receiver’s supported range" in script
