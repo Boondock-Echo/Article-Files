@@ -1,0 +1,651 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from types import SimpleNamespace
+from urllib.parse import urlencode
+
+from rf_mcp.web import RfWebApp
+
+
+class FakeCatalog:
+    def list_jobs(self, **kwargs):
+        return [{"job_id": "job-1", "job_type": "spectrum", "state": "completed",
+                 "created_at": "2026-08-11T12:00:00+00:00"}]
+
+    def list_artifacts(self, **kwargs):
+        return [{"artifact_id": "art-deadbeef", "filename": "plot.png",
+                 "kind": "spectrum_plot", "size_bytes": 1234, "path": "/tmp/plot.png",
+                 "mime_type": "image/png"}]
+
+    def storage_status(self):
+        return {"total_size_bytes": 1234, "free_bytes": 10_000}
+
+    def list_presets(self, **kwargs):
+        return [{"preset_id": "preset-memory", "name": "Hourly stations",
+                 "preset_type": "station_memory_scan"}]
+
+    def get_preset(self, value):
+        return self.list_presets()[0]
+
+    def list_schedules(self, **kwargs):
+        return [{"schedule_id": "schedule-memory", "name": "Hourly",
+                 "preset_id": "preset-memory", "preset_name": "Hourly stations",
+                 "preset_type": "station_memory_scan", "interval_seconds": 3600,
+                 "enabled": True, "next_run_at": "2026-08-11T13:00:00+00:00"}]
+
+    def get_job(self, job_id):
+        return {"job_id": job_id, "result": {"completed_at": "2026-08-11T12:00:05+00:00",
+            "completed_count": 1, "failed_count": 0, "change_count": 1,
+            "changes": [{"kind": "snr_changed", "memory_id": "memory-1", "name": "WWV"}],
+            "observations": [{"memory_id": "memory-1", "name": "WWV",
+                "frequency_hz": 10_000_000, "mode": "am", "state": "completed",
+                "metrics": {"estimated_snr_db": 12.5}}]}}
+
+    def list_alert_events(self, **kwargs):
+        return [{"event_id": "alert-1", "event_type": "watchlist",
+                 "rule_name": "Signal change", "created_at": "2026-08-11T12:01:00+00:00",
+                 "acknowledged": False}]
+
+    def acknowledge_alert_event(self, event_id):
+        return {"event_id": event_id, "acknowledged": True}
+
+    def list_fm_stations(self, **kwargs):
+        return [{"frequency_hz": 100_100_000, "ps": "TESTFM", "pi_code": "1234",
+                 "pty_name": "Rock", "radiotext": "Test Radio", "stereo_detected": True,
+                 "estimated_snr_db": 18.5, "rds_group_count": 12,
+                 "last_seen_at": "2026-08-11T12:02:00+00:00"}]
+
+    def list_weak_signal_spots(self, **kwargs):
+        return [{"mode": "ft8", "dial_frequency_hz": 14_074_000,
+                 "rf_frequency_hz": 14_075_500, "callsign": "K1ABC", "grid": "FN31",
+                 "snr_db": -12, "message": "CQ K1ABC FN31",
+                 "captured_at": "2026-08-11T12:03:00+00:00"}]
+
+    def list_fldigi_decodes(self, **kwargs):
+        return [{"mode": "olivia-8-250", "dial_frequency_hz": 14_071_000,
+                 "text": "TEST DECODE", "captured_at": "2026-08-11T12:04:00+00:00"}]
+
+    def list_sstv_images(self, **kwargs):
+        return [{"image_id": "sstv-test", "job_id": "sstv-job-1",
+                 "frequency_hz": 14_230_000, "receiver_mode": "usb",
+                 "sstv_mode": "Martin M1", "width": 320, "height": 256,
+                 "quality": 0.8, "duplicate_of": None,
+                 "image_path": "/tmp/sstv-test.png",
+                 "captured_at": "2026-08-11T12:05:00+00:00"}]
+
+
+async def downstream(scope, receive, send):
+    raise AssertionError(f"Unexpected downstream route: {scope['path']}")
+
+
+async def request(app, path, *, method="GET", headers=None, body=b""):
+    messages = []
+    delivered = False
+
+    async def receive():
+        nonlocal delivered
+        if delivered:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        delivered = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message):
+        messages.append(message)
+
+    await app({"type": "http", "path": path, "method": method,
+               "headers": headers or []}, receive, send)
+    return messages
+
+
+def response_body(messages):
+    return b"".join(item.get("body", b"") for item in messages[1:])
+
+
+def response_headers(messages):
+    return dict(messages[0]["headers"])
+
+
+def test_dashboard_without_auth_serves_html_and_json(tmp_path, monkeypatch):
+    from rf_mcp import sdr_coordinator
+    monkeypatch.setattr(sdr_coordinator, "DATA_DIR", tmp_path)
+    app = RfWebApp(downstream, FakeCatalog(), None, "0.42.0")
+    page = asyncio.run(request(app, "/dashboard"))
+    data = asyncio.run(request(app, "/api/dashboard"))
+    assert page[0]["status"] == 200
+    assert b"MiniRackDisplay" in response_body(page)
+    assert b"v0.42.0" in response_body(page)
+    assert data[0]["status"] == 200
+    assert b'"artifact_id":"art-deadbeef"' in response_body(data)
+    assert b"content-security-policy" in response_headers(page)
+    policy = response_headers(page)[b"content-security-policy"]
+    assert b"style-src 'self' 'unsafe-inline'" in policy
+    assert b"script-src 'self'" in policy
+    assert b'<link rel="stylesheet" href="/assets/rf-dashboard.css">' in response_body(page)
+    assert b'<script src="/assets/rf-dashboard.js"></script>' in response_body(page)
+    assert b"<script>" not in response_body(page)
+    stylesheet = asyncio.run(request(app, "/assets/rf-dashboard.css"))
+    script = asyncio.run(request(app, "/assets/rf-dashboard.js"))
+    assert stylesheet[0]["status"] == script[0]["status"] == 200
+    assert response_headers(stylesheet)[b"content-type"] == b"text/css; charset=utf-8"
+    assert b":root{" in response_body(stylesheet)
+    assert b"--bg:#07101d" in response_body(stylesheet)
+    assert b"color:var(--text)" in response_body(stylesheet)
+    assert b"scanReceivers" in response_body(script)
+    assert b"Scan for receivers" in response_body(script)
+    assert b"/api/receivers/discover" in response_body(script)
+    assert b"/api/receivers/register" in response_body(script)
+
+
+def test_dashboard_guided_receiver_discovery_and_registration(tmp_path, monkeypatch):
+    from rf_mcp import sdr_coordinator
+    monkeypatch.setattr(sdr_coordinator, "DATA_DIR", tmp_path)
+    discovered = {"device_count": 1, "devices": [{
+        "backend": "rtl_sdr", "device_selector": "00000042",
+        "display_name": "RTL-SDR · 00000042", "suggested_receiver_id": "rtl-sdr-00000042",
+        "suggested_name": "RTL-SDR 00000042", "suggested_role": "vhf_uhf_monitor",
+        "verified": True, "already_registered": False,
+    }], "diagnostics": [], "writes_registry": False}
+    monkeypatch.setattr(sdr_coordinator, "discover_devices", lambda: discovered)
+    app = RfWebApp(downstream, FakeCatalog(), None, "0.66.0")
+    scan = asyncio.run(request(app, "/api/receivers/discover", method="POST", body=b"{}"))
+    assert scan[0]["status"] == 200
+    assert b'"device_selector":"00000042"' in response_body(scan)
+
+    monkeypatch.setattr(sdr_coordinator, "register_discovered_device", lambda **values: {
+        "registered": True, "receiver": {**values, "verified": True},
+    })
+    payload = json.dumps({
+        "backend": "rtl_sdr", "device_selector": "00000042", "receiver_id": "rtl-vhf",
+        "name": "VHF receiver", "role": "vhf_uhf_monitor", "priority": 80,
+    }).encode()
+    added = asyncio.run(request(app, "/api/receivers/register", method="POST", body=payload))
+    assert added[0]["status"] == 200
+    assert b'"registered":true' in response_body(added)
+
+
+def test_dashboard_token_login_cookie_and_logout(tmp_path, monkeypatch):
+    from rf_mcp import sdr_coordinator
+    monkeypatch.setattr(sdr_coordinator, "DATA_DIR", tmp_path)
+    token = "correct-token-" + "x" * 32
+    app = RfWebApp(downstream, FakeCatalog(), token, "0.42.0")
+    denied = asyncio.run(request(app, "/dashboard"))
+    bad = asyncio.run(request(app, "/dashboard/login", method="POST",
+                              body=urlencode({"token": "wrong"}).encode()))
+    login = asyncio.run(request(app, "/dashboard/login", method="POST",
+                                body=urlencode({"token": token}).encode()))
+    assert denied[0]["status"] == 401
+    assert bad[0]["status"] == 401
+    assert login[0]["status"] == 303
+    cookie = response_headers(login)[b"set-cookie"].split(b";", 1)[0]
+    page = asyncio.run(request(app, "/dashboard", headers=[(b"cookie", cookie)]))
+    data = asyncio.run(request(app, "/api/dashboard", headers=[(b"cookie", cookie)]))
+    assert page[0]["status"] == data[0]["status"] == 200
+    logout = asyncio.run(request(app, "/dashboard/logout", method="POST",
+                                 headers=[(b"cookie", cookie)]))
+    assert logout[0]["status"] == 303
+    denied_again = asyncio.run(request(app, "/api/dashboard", headers=[(b"cookie", cookie)]))
+    assert denied_again[0]["status"] == 401
+
+
+def test_dashboard_accepts_bearer_header_without_cookie(tmp_path, monkeypatch):
+    from rf_mcp import sdr_coordinator
+    monkeypatch.setattr(sdr_coordinator, "DATA_DIR", tmp_path)
+    token = "bearer-" + "z" * 32
+    app = RfWebApp(downstream, FakeCatalog(), token, "0.42.0")
+    messages = asyncio.run(request(
+        app, "/api/dashboard",
+        headers=[(b"authorization", f"Bearer {token}".encode())],
+    ))
+    assert messages[0]["status"] == 200
+
+
+def test_dashboard_exposes_rf_operations_data(tmp_path, monkeypatch):
+    from rf_mcp import sdr_coordinator
+    monkeypatch.setattr(sdr_coordinator, "DATA_DIR", tmp_path)
+    app = RfWebApp(downstream, FakeCatalog(), None, "0.50.0")
+    messages = asyncio.run(request(app, "/api/dashboard"))
+    body = response_body(messages)
+    assert messages[0]["status"] == 200
+    assert b'"station_scan_profiles"' in body
+    assert b'"station_schedules"' in body
+    assert b'"station_scan_history"' in body
+    assert b'"estimated_snr_db":12.5' in body
+    assert b'"recent_alerts"' in body
+    page = response_body(asyncio.run(request(app, "/dashboard"))) + response_body(
+        asyncio.run(request(app, "/assets/rf-dashboard.js"))
+    )
+    assert b"RF Operations" in page
+    assert b"Memory scan trend" in page
+    assert b"Create a memory scan profile" in page
+    assert b"Save memory" in page
+    assert b"Run scan now" in page
+    assert b"Setup progress" in page
+    assert b"Save changes" in page
+    assert b"Scan &amp; Analyze" not in page  # text is emitted directly in inline HTML
+    assert b"Scan & Analyze" in page
+    assert b"Saved RF presets" in page
+    assert b"FM band survey &amp; station directory" not in page
+    assert b"FM band survey & station directory" in page
+    assert b"Discovered stations" in page
+    assert b"fmDirectoryPlayer" in page
+    assert b"fmDirectoryAudio" in page
+    assert b"Download WAV" in page
+    assert b"Receiving" in page
+    assert b"Press Play below to hear the recording" in page
+    assert b"receiverBar" in page
+    assert b"Receiver activity" in page
+    assert b"stopActiveJob" in page
+    assert b"Quick Start" in page
+    assert b"Favorite stations" in page
+    assert b"parseFrequency" in page
+    assert b"145800 kHz" in page
+    assert b"Digital Modes" in page
+    assert b"Decode again" in page
+    assert b"Try FT8 on 20 m" in page
+    assert b"Configure Fldigi decode" in page
+    assert b"Band / activity frequency" in page
+    assert b"Decoder audio center" in page
+    assert b"North America APRS" in page
+    assert b"ISS packet" in page
+    assert b"Recent weak-signal spots" in page
+    assert b"digitalWaterfall" in page
+    assert b"spectral contrast" in page
+    assert b"Band activity map" in page
+    assert b"fmBandMap" in page
+    assert b"setButtonBusy" in page
+    assert b"aria-busy" in page
+    assert b"Live and recent RF jobs" in page
+    assert b"Visual results" in page
+    assert b"jobProgressCards" in page
+    assert b"bandProgressMap" in page
+    assert b"renderBandProgress" in page
+    assert b"about " in page
+    assert b"SSTV receive &amp; gallery" not in page
+    assert b"SSTV receive & gallery" in page
+    assert b"Decoded image gallery" in page
+    assert b"recentAudio" in page
+
+
+def test_dashboard_exposes_active_rf_job_for_global_status(tmp_path, monkeypatch):
+    from rf_mcp import operations, sdr_coordinator
+    monkeypatch.setattr(sdr_coordinator, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(operations, "active_long_job", lambda: "survey-active")
+    catalog = FakeCatalog()
+    catalog.get_job = lambda job_id: {
+        "job_id": job_id, "job_type": "band_survey", "state": "running",
+        "created_at": "2026-08-12T12:00:00+00:00",
+        "config": {"planned_steps": 20},
+        "summary": {"completed_steps": 7, "planned_steps": 20},
+    }
+    messages = asyncio.run(request(
+        RfWebApp(downstream, catalog, None, "0.57.0"), "/api/dashboard"
+    ))
+    payload = json.loads(response_body(messages))
+    assert messages[0]["status"] == 200
+    assert payload["active_long_job"] == "survey-active"
+    assert payload["active_rf_job"]["job_type"] == "band_survey"
+    assert payload["active_rf_job"]["summary"]["completed_steps"] == 7
+
+
+def test_dashboard_station_schedule_operations_validate_and_dispatch():
+    calls = []
+    create = lambda **kwargs: calls.append(("create", kwargs)) or {"schedule_id": "s-1"}
+    run = lambda **kwargs: calls.append(("run", kwargs)) or {"execution_status": "completed"}
+    toggle = lambda **kwargs: calls.append(("toggle", kwargs)) or {"enabled": kwargs["enabled"]}
+    app = RfWebApp(downstream, FakeCatalog(), None, "0.50.0", None, None, None,
+                   create, run, toggle)
+    created = asyncio.run(request(app, "/api/station-schedules", method="POST",
+        body=b'{"name":"Hourly","preset_id_or_name":"preset-memory","interval_seconds":3600,"enabled":true}'))
+    ran = asyncio.run(request(app, "/api/station-schedules/run", method="POST",
+        body=b'{"schedule_id_or_name":"s-1"}'))
+    toggled = asyncio.run(request(app, "/api/station-schedules/toggle", method="POST",
+        body=b'{"schedule_id_or_name":"s-1","enabled":false}'))
+    bad = asyncio.run(request(app, "/api/station-schedules", method="POST",
+        body=b'{"name":"Bad","preset_id_or_name":"preset-memory","interval_seconds":60,"extra":1}'))
+    assert created[0]["status"] == ran[0]["status"] == toggled[0]["status"] == 200
+    assert bad[0]["status"] == 400
+    assert [item[0] for item in calls] == ["create", "run", "toggle"]
+
+
+def test_dashboard_acknowledges_alert_and_requires_auth():
+    token = "token-" + "a" * 32
+    app = RfWebApp(downstream, FakeCatalog(), token, "0.50.0")
+    denied = asyncio.run(request(app, "/api/alerts/acknowledge", method="POST",
+                                 body=b'{"event_id":"alert-1"}'))
+    accepted = asyncio.run(request(app, "/api/alerts/acknowledge", method="POST",
+        headers=[(b"authorization", f"Bearer {token}".encode())],
+        body=b'{"event_id":"alert-1"}'))
+    assert denied[0]["status"] == 401
+    assert accepted[0]["status"] == 200
+    assert b'"acknowledged":true' in response_body(accepted)
+
+
+def test_dashboard_creates_memory_profile_and_runs_profile():
+    calls = []
+    make_profile = lambda **kwargs: calls.append(("profile", kwargs)) or {"preset_id": "p-1"}
+    run_profile = lambda **kwargs: calls.append(("run", kwargs)) or {"completed_count": 1}
+    make_memory = lambda **kwargs: calls.append(("memory", kwargs)) or {"memory_id": "m-1"}
+    app = RfWebApp(downstream, FakeCatalog(), None, "0.50.3", None, None, None,
+                   None, None, None, make_profile, run_profile, make_memory)
+    memory = asyncio.run(request(app, "/api/station-memories", method="POST",
+        body=b'{"name":"WWV","frequency_hz":10000000,"mode":"am","bandwidth_hz":10000,"enabled":true}'))
+    profile = asyncio.run(request(app, "/api/station-scan-profiles", method="POST",
+        body=b'{"name":"Time stations","memory_ids_or_names":["m-1"],"duration_seconds":5,"max_memories":1}'))
+    run = asyncio.run(request(app, "/api/station-scan-profiles/run", method="POST",
+        body=b'{"preset_id_or_name":"p-1"}'))
+    assert memory[0]["status"] == profile[0]["status"] == run[0]["status"] == 200
+    assert [item[0] for item in calls] == ["memory", "profile", "run"]
+
+
+def test_dashboard_management_delete_endpoints_dispatch_confirmations():
+    calls = []
+    def remove(kind):
+        return lambda **kwargs: calls.append((kind, kwargs)) or {"deleted": True}
+    app = RfWebApp(
+        downstream, FakeCatalog(), None, "0.51.0",
+        station_memory_delete=remove("memory"),
+        scan_profile_delete=remove("profile"), schedule_delete=remove("schedule"),
+    )
+    cases = [
+        ("/api/station-memories/delete",
+         b'{"memory_id_or_name":"m-1","confirm_delete":true}'),
+        ("/api/station-scan-profiles/delete",
+         b'{"preset_id_or_name":"p-1","confirm_delete":true}'),
+        ("/api/station-schedules/delete",
+         b'{"schedule_id_or_name":"s-1","confirm_delete":true}'),
+    ]
+    responses = [asyncio.run(request(app, path, method="POST", body=body))
+                 for path, body in cases]
+    assert all(item[0]["status"] == 200 for item in responses)
+    assert [item[0] for item in calls] == ["memory", "profile", "schedule"]
+
+
+def test_dashboard_band_scan_survey_status_stop_and_preset_endpoints():
+    calls = []
+    def callback(kind, result):
+        return lambda **kwargs: calls.append((kind, kwargs)) or result
+    app = RfWebApp(
+        downstream, FakeCatalog(), None, "0.52.0",
+        band_scan_start=callback("scan", {"job_id": "scan-1"}),
+        band_survey_start=callback("survey", {"job_id": "survey-1"}),
+        band_job_status=callback("status", {"state": "running"}),
+        band_job_stop=callback("stop", {"state": "stopping"}),
+        preset_run=callback("preset", {"job_id": "preset-1"}),
+    )
+    cases = [
+        ("/api/band-scan/start", b'{"start_frequency_hz":14000000,"stop_frequency_hz":14350000}'),
+        ("/api/band-survey/start", b'{"start_frequency_hz":14000000,"stop_frequency_hz":14350000,"classify_top_signals":5}'),
+        ("/api/band-jobs/status", b'{"job_id":"scan-1"}'),
+        ("/api/band-jobs/stop", b'{"job_id":"scan-1"}'),
+        ("/api/presets/run", b'{"preset_id_or_name":"preset-memory"}'),
+    ]
+    responses = [asyncio.run(request(app, path, method="POST", body=body))
+                 for path, body in cases]
+    assert all(item[0]["status"] == 200 for item in responses)
+    assert [item[0] for item in calls] == ["scan", "survey", "status", "stop", "preset"]
+
+
+def test_dashboard_fm_survey_start_status_stop_and_directory():
+    calls = []
+    def callback(kind, result):
+        return lambda **kwargs: calls.append((kind, kwargs)) or result
+    app = RfWebApp(
+        downstream, FakeCatalog(), None, "0.53.0",
+        fm_survey_start=callback("start", {"job_id": "fm-survey-1"}),
+        fm_survey_status=callback("status", {"state": "running"}),
+        fm_survey_stop=callback("stop", {"state": "stopping"}),
+    )
+    dashboard = asyncio.run(request(app, "/api/dashboard"))
+    cases = [
+        ("/api/fm-surveys/start", b'{"start_frequency_hz":87900000,"stop_frequency_hz":107900000,"channel_spacing_hz":200000}'),
+        ("/api/fm-surveys/status", b'{"job_id":"fm-survey-1"}'),
+        ("/api/fm-surveys/stop", b'{"job_id":"fm-survey-1"}'),
+    ]
+    responses = [asyncio.run(request(app, path, method="POST", body=body))
+                 for path, body in cases]
+    assert dashboard[0]["status"] == 200
+    assert b'"ps":"TESTFM"' in response_body(dashboard)
+    assert all(item[0]["status"] == 200 for item in responses)
+    assert [item[0] for item in calls] == ["start", "status", "stop"]
+
+
+def test_dashboard_digital_decoder_endpoints_and_persisted_results():
+    calls = []
+    def callback(kind, result):
+        return lambda **kwargs: calls.append((kind, kwargs)) or result
+    app = RfWebApp(
+        downstream, FakeCatalog(), None, "0.54.0",
+        digital_decode=callback("native", {"decoder": {"text": "CQ", "confidence": .8}}),
+        weak_decode=callback("weak", {"spots": [{"message": "CQ TEST"}]}),
+        fldigi_decode=callback("fldigi", {"text": "HELLO"}),
+        decoder_capabilities=callback("caps", {"wsjt_x": {"available": True}}),
+    )
+    dashboard = asyncio.run(request(app, "/api/dashboard"))
+    cases = [
+        ("/api/digital/native", b'{"frequency_hz":14070000,"mode":"bpsk31","duration_seconds":10}'),
+        ("/api/digital/weak", b'{"frequency_hz":14074000,"mode":"ft8","capture_cycles":1}'),
+        ("/api/digital/fldigi", b'{"frequency_hz":14071000,"mode":"olivia-8-250","duration_seconds":30}'),
+        ("/api/digital/capabilities", b'{}'),
+    ]
+    responses = [asyncio.run(request(app, path, method="POST", body=body))
+                 for path, body in cases]
+    assert b'"callsign":"K1ABC"' in response_body(dashboard)
+    assert b'"text":"TEST DECODE"' in response_body(dashboard)
+    assert all(item[0]["status"] == 200 for item in responses)
+    assert [item[0] for item in calls] == ["native", "weak", "fldigi", "caps"]
+
+
+def test_dashboard_sstv_controls_gallery_and_authenticated_image(tmp_path):
+    calls = []
+    image_path = tmp_path / "decoded.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nTEST")
+
+    def callback(kind, result):
+        return lambda **kwargs: calls.append((kind, kwargs)) or result
+
+    catalog = FakeCatalog()
+    catalog.list_sstv_images = lambda **kwargs: [{
+        "image_id": "sstv-test", "job_id": "sstv-job-1",
+        "frequency_hz": 14_230_000, "receiver_mode": "usb",
+        "sstv_mode": "Martin M1", "width": 320, "height": 256,
+        "quality": 0.8, "duplicate_of": None, "image_path": str(image_path),
+        "captured_at": "2026-08-11T12:05:00+00:00",
+    }]
+    catalog.get_sstv_image = lambda image_id: catalog.list_sstv_images()[0]
+    app = RfWebApp(
+        downstream, catalog, None, "0.55.0",
+        sstv_decode=callback("decode", {"job_id": "sstv-1"}),
+        sstv_watch_start=callback("watch", {"job_id": "watch-1"}),
+        sstv_status=callback("status", {"state": "running"}),
+        sstv_watch_status=callback("watch-status", {"state": "running"}),
+        sstv_stop=callback("stop", {"state": "stopping"}),
+        sstv_watch_stop=callback("watch-stop", {"state": "stopping"}),
+        sstv_capabilities=callback("caps", {"available": True}),
+    )
+    dashboard = asyncio.run(request(app, "/api/dashboard"))
+    cases = [
+        ("/api/sstv/decode", b'{"frequency_hz":14230000,"duration_seconds":130,"receiver_mode":"usb"}'),
+        ("/api/sstv/watch", b'{"frequency_hz":145800000,"watch_duration_seconds":3600,"receiver_mode":"nfm"}'),
+        ("/api/sstv/status", b'{"job_id":"sstv-1"}'),
+        ("/api/sstv/watch-status", b'{"job_id":"watch-1"}'),
+        ("/api/sstv/stop", b'{"job_id":"sstv-1"}'),
+        ("/api/sstv/watch-stop", b'{"job_id":"watch-1"}'),
+        ("/api/sstv/capabilities", b'{}'),
+    ]
+    responses = [asyncio.run(request(app, path, method="POST", body=body))
+                 for path, body in cases]
+    image = asyncio.run(request(app, "/sstv-images/sstv-test"))
+    token = "sstv-token-" + "x" * 32
+    secure_app = RfWebApp(downstream, catalog, token, "0.55.0")
+    denied_image = asyncio.run(request(secure_app, "/sstv-images/sstv-test"))
+    authorized_image = asyncio.run(request(
+        secure_app, "/sstv-images/sstv-test",
+        headers=[(b"authorization", f"Bearer {token}".encode())],
+    ))
+    assert b'"image_url":"/sstv-images/sstv-test"' in response_body(dashboard)
+    assert all(item[0]["status"] == 200 for item in responses)
+    assert [item[0] for item in calls] == [
+        "decode", "watch", "status", "watch-status", "stop", "watch-stop", "caps"
+    ]
+    assert image[0]["status"] == 200
+    assert response_headers(image)[b"content-type"] == b"image/png"
+    assert response_body(image).startswith(b"\x89PNG")
+    assert denied_image[0]["status"] == 401
+    assert authorized_image[0]["status"] == 200
+
+
+def test_login_rejects_large_request_body():
+    token = "token-" + "q" * 32
+    app = RfWebApp(downstream, FakeCatalog(), token, "0.42.0")
+    messages = asyncio.run(request(app, "/dashboard/login", method="POST", body=b"x" * 9000))
+    assert messages[0]["status"] == 413
+
+
+def test_dashboard_spectrum_capture_forces_safe_options(tmp_path, monkeypatch):
+    from rf_mcp import sdr_coordinator
+    monkeypatch.setattr(sdr_coordinator, "DATA_DIR", tmp_path)
+    calls = []
+
+    def capture(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(structuredContent={
+            "job_id": "inspect-test", "center_frequency_hz": kwargs["center_frequency_hz"],
+            "duration_seconds": kwargs["duration_seconds"], "relative_noise_floor_db": -41.2,
+            "peak_count": 1, "peaks": [{"frequency_hz": 10_001_000}],
+        })
+
+    catalog = FakeCatalog()
+    catalog.list_artifacts = lambda **kwargs: [{
+        "artifact_id": "art-deadbeef", "filename": "spectrum.png",
+        "kind": "spectrum_plot", "size_bytes": 123, "mime_type": "image/png",
+        "path": "/tmp/spectrum.png",
+    }]
+    app = RfWebApp(downstream, catalog, None, "0.43.0", capture)
+    body = b'{"center_frequency_hz":10000000,"duration_seconds":2,"fft_size":16384}'
+    messages = asyncio.run(request(app, "/api/spectrum", method="POST", body=body))
+    assert messages[0]["status"] == 200
+    assert calls[0]["retain_iq"] is False
+    assert calls[0]["include_plot"] is False
+    assert b'"download_path":"/artifacts/art-deadbeef"' in response_body(messages)
+
+
+def test_dashboard_spectrum_replaces_nonfinite_measurements_with_json_null():
+    def capture(**kwargs):
+        return SimpleNamespace(structuredContent={
+            "job_id": "inspect-infinite", "center_frequency_hz": 10_000_000,
+            "duration_seconds": 1, "relative_noise_floor_db": -40.0,
+            "peak_count": 1, "peaks": [{"frequency_hz": 10_001_000,
+                                          "prominence_db": float("inf")}],
+        })
+    catalog = FakeCatalog()
+    catalog.list_artifacts = lambda **kwargs: []
+    app = RfWebApp(downstream, catalog, None, "0.50.1", capture)
+    messages = asyncio.run(request(app, "/api/spectrum", method="POST",
+        body=b'{"center_frequency_hz":10000000,"duration_seconds":1}'))
+    payload = json.loads(response_body(messages))
+    assert messages[0]["status"] == 200
+    assert payload["peaks"][0]["prominence_db"] is None
+    assert b"Infinity" not in response_body(messages)
+
+
+def test_dashboard_spectrum_rejects_unknown_fields_and_excess_duration():
+    app = RfWebApp(downstream, FakeCatalog(), None, "0.43.0", lambda **kwargs: None)
+    unknown = asyncio.run(request(app, "/api/spectrum", method="POST",
+                                  body=b'{"center_frequency_hz":10000000,"retain_iq":true}'))
+    long = asyncio.run(request(app, "/api/spectrum", method="POST",
+                               body=b'{"center_frequency_hz":10000000,"duration_seconds":11}'))
+    assert unknown[0]["status"] == 400
+    assert long[0]["status"] == 400
+
+
+def test_dashboard_demodulation_returns_audio_and_forces_safe_options():
+    calls = []
+
+    def analyze(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(structuredContent={
+            "job_id": "analyze-test", "requested_frequency_hz": kwargs["frequency_hz"],
+            "mode": kwargs["mode"], "bandwidth_hz": kwargs["bandwidth_hz"],
+            "duration_seconds": kwargs["duration_seconds"],
+            "metrics": {"estimated_snr_db": 12.3, "signal_present": True},
+        })
+
+    catalog = FakeCatalog()
+    catalog.list_artifacts = lambda **kwargs: [
+        {"artifact_id": "art-audio", "filename": "audio.wav", "kind": "audio_wav",
+         "size_bytes": 100, "mime_type": "audio/wav", "path": "/tmp/audio.wav"},
+        {"artifact_id": "art-rf", "filename": "rf.png", "kind": "rf_spectrum_plot",
+         "size_bytes": 100, "mime_type": "image/png", "path": "/tmp/rf.png"},
+        {"artifact_id": "art-audio-plot", "filename": "audio.png",
+         "kind": "audio_spectrum_plot", "size_bytes": 100,
+         "mime_type": "image/png", "path": "/tmp/audio.png"},
+    ]
+    app = RfWebApp(downstream, catalog, None, "0.44.0", None, analyze)
+    body = b'{"frequency_hz":7100000,"mode":"lsb","bandwidth_hz":3000,"duration_seconds":5}'
+    messages = asyncio.run(request(app, "/api/demodulate", method="POST", body=body))
+    assert messages[0]["status"] == 200
+    assert calls[0]["retain_iq"] is False
+    assert calls[0]["include_audio"] is False
+    assert calls[0]["include_plots"] is False
+    assert b'"download_path":"/artifacts/art-audio"' in response_body(messages)
+
+
+def test_dashboard_demodulation_validates_mode_bandwidth_and_fields():
+    app = RfWebApp(downstream, FakeCatalog(), None, "0.44.0", None,
+                   lambda **kwargs: None)
+    bad_mode = asyncio.run(request(app, "/api/demodulate", method="POST",
+                                    body=b'{"frequency_hz":10000000,"mode":"wfm"}'))
+    bad_bandwidth = asyncio.run(request(app, "/api/demodulate", method="POST",
+                                         body=b'{"frequency_hz":10000000,"mode":"cw","bandwidth_hz":5000}'))
+    retained = asyncio.run(request(app, "/api/demodulate", method="POST",
+                                    body=b'{"frequency_hz":10000000,"retain_iq":true}'))
+    assert bad_mode[0]["status"] == 400
+    assert bad_bandwidth[0]["status"] == 400
+    assert retained[0]["status"] == 400
+
+
+def test_dashboard_broadcast_fm_returns_audio_plot_and_rds():
+    calls = []
+
+    def receive_fm(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(structuredContent={
+            "job_id": "wfm-test", "requested_frequency_hz": kwargs["frequency_hz"],
+            "duration_seconds": kwargs["duration_seconds"],
+            "metrics": {"audio_channels": 2, "stereo_detected": True},
+            "rds": {"group_count": 4, "station": {"program_service": "TESTFM"}},
+        })
+
+    catalog = FakeCatalog()
+    catalog.list_artifacts = lambda **kwargs: [
+        {"artifact_id": "art-fm-audio", "filename": "fm.wav",
+         "kind": "broadcast_fm_audio", "size_bytes": 100,
+         "mime_type": "audio/wav", "path": "/tmp/fm.wav"},
+        {"artifact_id": "art-fm-plot", "filename": "fm.png",
+         "kind": "broadcast_fm_multiplex_plot", "size_bytes": 100,
+         "mime_type": "image/png", "path": "/tmp/fm.png"},
+    ]
+    app = RfWebApp(downstream, catalog, None, "0.45.0", None, None, receive_fm)
+    body = b'{"frequency_hz":100100000,"duration_seconds":10,"stereo":true,"deemphasis_us":75,"decode_rds_data":true}'
+    messages = asyncio.run(request(app, "/api/broadcast-fm", method="POST", body=body))
+    assert messages[0]["status"] == 200
+    assert calls[0]["retain_iq"] is False
+    assert calls[0]["include_audio"] is False
+    assert calls[0]["include_plot"] is False
+    assert b'"program_service":"TESTFM"' in response_body(messages)
+    assert b'"download_path":"/artifacts/art-fm-audio"' in response_body(messages)
+
+
+def test_dashboard_broadcast_fm_validates_band_duration_and_booleans():
+    app = RfWebApp(downstream, FakeCatalog(), None, "0.45.0", None, None,
+                   lambda **kwargs: None)
+    outside = asyncio.run(request(app, "/api/broadcast-fm", method="POST",
+                                   body=b'{"frequency_hz":10700000}'))
+    duration = asyncio.run(request(app, "/api/broadcast-fm", method="POST",
+                                    body=b'{"frequency_hz":100100000,"duration_seconds":6}'))
+    boolean = asyncio.run(request(app, "/api/broadcast-fm", method="POST",
+                                   body=b'{"frequency_hz":100100000,"stereo":"yes"}'))
+    assert outside[0]["status"] == 400
+    assert duration[0]["status"] == 400
+    assert boolean[0]["status"] == 400

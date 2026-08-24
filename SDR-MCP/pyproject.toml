@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rf-mcp"
+version = "1.0.1"
+description = "Receive-only multi-SDR spectrum analysis MCP server"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "mcp>=1.12,<2",
+  "numpy>=1.24,<2.5",
+  "scipy>=1.10",
+  "matplotlib>=3.6",
+  "Pillow>=9",
+  "skyfield>=1.45,<2",
+]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Operating System :: POSIX :: Linux",
+  "Topic :: Communications :: Ham Radio",
+]
+
+[project.scripts]
+rf-mcp = "rf_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
