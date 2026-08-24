@@ -818,3 +818,49 @@ def test_dashboard_frequency_controls_share_memory_recall_and_integer_hz_payload
     assert "start_frequency_hz:frequencyValue('bandStart')" in script
     assert "Stop frequency must be greater than start frequency" in script
     assert "outside the selected receiver’s supported range" in script
+
+
+def test_dashboard_uses_accessible_confirmation_dialog_for_consequential_actions():
+    app = RfWebApp(downstream, FakeCatalog(), None, "0.50.0")
+    script = response_body(asyncio.run(request(app, "/assets/rf-dashboard.js")))
+    css = response_body(asyncio.run(request(app, "/assets/rf-dashboard.css")))
+
+    assert b"confirm(" not in script
+    assert b"requestConfirmation" in script
+    assert b"confirmAndRun" in script
+    assert b"aria-labelledby" in script and b"aria-describedby" in script
+    assert b"Affected: " in script
+    assert b"event.key!=='Tab'" in script
+    assert b"addEventListener('cancel'" in script
+    assert b"confirmationOpener.focus()" in script
+    assert b"confirmationPending" in script
+    assert b"Destructive action" in css and b"border-style:double" in css
+
+
+def test_confirmation_cancel_and_confirm_paths_are_separate():
+    app = RfWebApp(downstream, FakeCatalog(), None, "0.50.0")
+    script = response_body(asyncio.run(request(app, "/assets/rf-dashboard.js")))
+
+    assert b"confirmationCancel.addEventListener('click',()=>closeConfirmation(false))" in script
+    assert b"if(!await requestConfirmation(options))return false" in script
+    assert b"confirmationConfirm.addEventListener('click'" in script
+    assert b"await action();return true" in script
+
+
+def test_confirmed_actions_preserve_exact_api_requests():
+    app = RfWebApp(downstream, FakeCatalog(), None, "0.50.0")
+    script = response_body(asyncio.run(request(app, "/assets/rf-dashboard.js")))
+
+    expected_calls = [
+        b"postOperation('/api/station-memories/delete',{memory_id_or_name:m.memory_id,confirm_delete:true})",
+        b"postOperation('/api/station-scan-profiles/delete',{preset_id_or_name:p.preset_id,confirm_delete:true})",
+        b"postOperation('/api/station-schedules/delete',{schedule_id_or_name:s.schedule_id,confirm_delete:true})",
+        b"postOperation('/api/band-jobs/stop',{job_id:j.job_id})",
+        b"postOperation('/api/fm-surveys/stop',{job_id:j.job_id})",
+        b"postOperation(watch?'/api/sstv/watch-stop':'/api/sstv/stop',{job_id:j.job_id})",
+    ]
+    for call in expected_calls:
+        assert call in script
+
+    # Low-severity acknowledgement remains immediate and idempotent.
+    assert b"postOperation('/api/alerts/acknowledge',{event_id:e.alert.event_id})" in script
