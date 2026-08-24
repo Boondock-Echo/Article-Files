@@ -2446,6 +2446,19 @@ receiver leases are removed automatically on the next coordinator operation.
 Call `get_rf_recovery_status` to inspect the schema version, startup recovery
 count, active durable leases, and current recovery policy.
 
+Artifact directory reconciliation is an explicit maintenance operation so a
+large artifact collection cannot delay MCP readiness. Run it while the service
+is stopped (or schedule it as a low-priority post-start task):
+
+```bash
+python -m rf_mcp.catalog reconcile
+```
+
+Use `--data-dir /path/to/rf-mcp-data` when the catalog is not in the default
+`~/rf-mcp-data` directory. Newly generated artifacts are registered immediately;
+the command is only needed to discover externally copied files, refresh changed
+file metadata, and remove catalog entries for files that no longer exist.
+
 ## Upgrade an existing installation
 
 The service is deliberately fixed to `~/rf-mcp`; do not extract a release into

@@ -4,6 +4,7 @@ import json
 import mimetypes
 import shutil
 import sqlite3
+import stat as stat_module
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,7 +13,7 @@ from uuid import uuid4
 
 from .config import DATA_DIR, ensure_data_dirs
 
-CATALOG_SCHEMA_VERSION = 1
+CATALOG_SCHEMA_VERSION = 2
 
 
 def utc_now() -> str:
@@ -22,7 +23,7 @@ def utc_now() -> str:
 class Catalog:
     """Persistent RF job and artifact catalog backed by SQLite."""
 
-    def __init__(self, data_dir: Path = DATA_DIR, *, index_existing: bool = True) -> None:
+    def __init__(self, data_dir: Path = DATA_DIR, *, index_existing: bool = False) -> None:
         self.data_dir = Path(data_dir).resolve()
         self.database_path = self.data_dir / "rf-mcp.sqlite3"
         self._lock = threading.RLock()
@@ -108,6 +109,7 @@ class Catalog:
                     filename TEXT NOT NULL,
                     mime_type TEXT NOT NULL,
                     size_bytes INTEGER NOT NULL,
+                    mtime_ns INTEGER,
                     created_at TEXT NOT NULL,
                     pinned INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY(job_id) REFERENCES jobs(job_id) ON DELETE SET NULL
@@ -495,6 +497,11 @@ class Catalog:
                     ON sstv_images(frequency_hz, captured_at DESC);
                 """
             )
+            artifact_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(artifacts)")
+            }
+            if "mtime_ns" not in artifact_columns:
+                connection.execute("ALTER TABLE artifacts ADD COLUMN mtime_ns INTEGER")
             columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(sstv_images)")
             }
@@ -607,7 +614,12 @@ class Catalog:
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version,name,applied_at) "
                 "VALUES (?,?,?)",
-                (CATALOG_SCHEMA_VERSION, "baseline_v067", utc_now()),
+                (1, "baseline_v067", utc_now()),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version,name,applied_at) "
+                "VALUES (?,?,?)",
+                (2, "artifact_mtime", utc_now()),
             )
             connection.execute(f"PRAGMA user_version={CATALOG_SCHEMA_VERSION}")
 
@@ -2530,40 +2542,31 @@ class Catalog:
         mime_type: str | None = None,
         created_at: str | None = None,
     ) -> dict:
-        resolved = self._safe_path(path)
+        resolved = self._safe_path(path, must_exist=False)
+        stat = resolved.stat()
+        if not stat_module.S_ISREG(stat.st_mode):
+            raise FileNotFoundError(resolved)
         mime_type = mime_type or mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
         with self._lock, self._connect() as connection:
-            existing = connection.execute(
-                "SELECT * FROM artifacts WHERE path=?", (str(resolved),)
+            artifact_id = f"art-{uuid4().hex}"
+            row = connection.execute(
+                """
+                INSERT INTO artifacts (
+                    artifact_id, job_id, kind, path, filename, mime_type,
+                    size_bytes, mtime_ns, created_at, pinned
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                ON CONFLICT(path) DO UPDATE SET
+                    job_id=COALESCE(excluded.job_id, artifacts.job_id),
+                    kind=excluded.kind, filename=excluded.filename,
+                    mime_type=excluded.mime_type, size_bytes=excluded.size_bytes,
+                    mtime_ns=excluded.mtime_ns
+                RETURNING artifact_id
+                """,
+                (artifact_id, job_id, kind, str(resolved), resolved.name, mime_type,
+                 stat.st_size, stat.st_mtime_ns, created_at or datetime.fromtimestamp(
+                     stat.st_mtime, tz=timezone.utc).isoformat()),
             ).fetchone()
-            if existing is not None:
-                connection.execute(
-                    "UPDATE artifacts SET size_bytes=?, job_id=COALESCE(?, job_id), kind=?, mime_type=? WHERE path=?",
-                    (resolved.stat().st_size, job_id, kind, mime_type, str(resolved)),
-                )
-                artifact_id = existing["artifact_id"]
-            else:
-                artifact_id = f"art-{uuid4().hex}"
-                connection.execute(
-                    """
-                    INSERT INTO artifacts (
-                        artifact_id, job_id, kind, path, filename, mime_type,
-                        size_bytes, created_at, pinned
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
-                    """,
-                    (
-                        artifact_id,
-                        job_id,
-                        kind,
-                        str(resolved),
-                        resolved.name,
-                        mime_type,
-                        resolved.stat().st_size,
-                        created_at or datetime.fromtimestamp(
-                            resolved.stat().st_mtime, tz=timezone.utc
-                        ).isoformat(),
-                    ),
-                )
+            artifact_id = row["artifact_id"]
         return self.get_artifact(artifact_id)
 
     @staticmethod
@@ -2816,26 +2819,83 @@ class Catalog:
         }
 
     def index_existing_artifacts(self) -> int:
+        """Reconcile managed artifact directories in one SQLite transaction.
+
+        This is deliberately not run by construction; callers should schedule it
+        after startup or invoke the module's maintenance command.
+        """
         mapping = {
             "captures": "iq_capture",
             "plots": "plot",
             "audio": "audio_wav",
             "results": "result_json",
         }
-        count = 0
+        discovered: dict[str, tuple[Path, str, Any]] = {}
         for directory_name, kind in mapping.items():
             directory = self.data_dir / directory_name
             if not directory.exists():
                 continue
             for path in directory.iterdir():
-                if path.is_file() and not path.name.endswith(".part"):
-                    try:
-                        self.register_artifact(path, kind)
-                        count += 1
-                    except (OSError, ValueError):
-                        continue
-        return count
+                if path.name.endswith(".part"):
+                    continue
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                if stat_module.S_ISREG(stat.st_mode):
+                    discovered[str(path.resolve())] = (path.resolve(), kind, stat)
+
+        managed_roots = tuple(str((self.data_dir / name).resolve()) for name in mapping)
+        writes = 0
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT path,size_bytes,mtime_ns FROM artifacts"
+            ).fetchall()
+            cataloged = {row["path"]: row for row in rows}
+            for path_text, (path, kind, stat) in discovered.items():
+                existing = cataloged.get(path_text)
+                if (existing is not None and existing["size_bytes"] == stat.st_size
+                        and existing["mtime_ns"] == stat.st_mtime_ns):
+                    continue
+                mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+                connection.execute(
+                    """INSERT INTO artifacts
+                       (artifact_id,job_id,kind,path,filename,mime_type,size_bytes,mtime_ns,
+                        created_at,pinned) VALUES (?,NULL,?,?,?,?,?,?,?,0)
+                       ON CONFLICT(path) DO UPDATE SET kind=excluded.kind,
+                         filename=excluded.filename,mime_type=excluded.mime_type,
+                         size_bytes=excluded.size_bytes,mtime_ns=excluded.mtime_ns""",
+                    (f"art-{uuid4().hex}", kind, path_text, path.name, mime_type,
+                     stat.st_size, stat.st_mtime_ns,
+                     datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()),
+                )
+                writes += 1
+            missing = [path for path in cataloged if path not in discovered and any(
+                path == root or path.startswith(root + "/") for root in managed_roots
+            )]
+            if missing:
+                connection.executemany("DELETE FROM artifacts WHERE path=?",
+                                       ((path,) for path in missing))
+                writes += len(missing)
+        return writes
 
 
 ensure_data_dirs()
-catalog = Catalog()
+catalog = Catalog(index_existing=False)
+
+
+def main() -> None:
+    """Run catalog maintenance from ``python -m rf_mcp.catalog``."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="RF MCP catalog maintenance")
+    parser.add_argument("command", choices=("reconcile",))
+    parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
+    args = parser.parse_args()
+    with Catalog(args.data_dir) as maintenance_catalog:
+        writes = maintenance_catalog.index_existing_artifacts()
+    print(f"Artifact reconciliation complete: {writes} catalog writes")
+
+
+if __name__ == "__main__":
+    main()

@@ -71,4 +71,4 @@ def test_v069_catalog_upgrades_in_place_without_losing_jobs(tmp_path):
         connection.execute("PRAGMA user_version=0")
     upgraded = Catalog(tmp_path, index_existing=False)
     assert upgraded.get_job("v069-job")["state"] == "completed"
-    assert upgraded.schema_status()["current_version"] == 1
+    assert upgraded.schema_status()["current_version"] == 2
