@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,6 +64,9 @@ class ScanJob:
     stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
     render_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     thread: threading.Thread | None = field(default=None, repr=False)
+    last_persisted_monotonic: float | None = field(default=None, repr=False)
+    last_persisted_progress_state: tuple[Any, ...] | None = field(default=None, repr=False)
+    checkpoint_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 def _same_tuning_range(start_hz: int, stop_hz: int) -> bool:
@@ -82,9 +86,22 @@ def plan_centers(start_hz: int, stop_hz: int, overlap_fraction: float) -> list[i
 
 
 class ScanManager:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        checkpoint_min_interval_seconds: float = 1.0,
+        checkpoint_min_completed_steps: int = 5,
+        monotonic: Any = time.monotonic,
+    ) -> None:
+        if checkpoint_min_interval_seconds < 0:
+            raise ValueError("checkpoint_min_interval_seconds must not be negative")
+        if checkpoint_min_completed_steps < 1:
+            raise ValueError("checkpoint_min_completed_steps must be at least 1")
         self._jobs: dict[str, ScanJob] = {}
         self._lock = threading.RLock()
+        self._checkpoint_min_interval_seconds = float(checkpoint_min_interval_seconds)
+        self._checkpoint_min_completed_steps = int(checkpoint_min_completed_steps)
+        self._monotonic = monotonic
 
     def _get(self, job_id: str) -> ScanJob:
         with self._lock:
@@ -198,56 +215,100 @@ class ScanManager:
     def _job_type(job: ScanJob) -> str:
         return "band_survey" if job.config.get("classify_top_signals", 0) else "band_scan"
 
-    def _checkpoint(self, job: ScanJob, *, current_frequency_hz: int | None = None) -> None:
+    def _checkpoint(
+        self,
+        job: ScanJob,
+        *,
+        current_frequency_hz: int | None = None,
+        force: bool = False,
+    ) -> bool:
         """Persist lightweight progress so remote dashboards survive refreshes/restarts."""
-        with self._lock:
-            completed = len(job.segments)
-            planned = len(job.centers_hz)
-            classification_completed = len(job.classifications)
-            classification_planned = job.classification_total
-            overall_planned = planned + max(
-                classification_planned,
-                int(job.config.get("classify_top_signals", 0)),
+        with job.checkpoint_lock:
+            now = self._monotonic()
+            with self._lock:
+                completed = len(job.segments)
+                planned = len(job.centers_hz)
+                classification_completed = len(job.classifications)
+                classification_planned = job.classification_total
+                overall_planned = planned + max(
+                    classification_planned,
+                    int(job.config.get("classify_top_signals", 0)),
+                )
+                overall_completed = completed + classification_completed
+                stop_requested = job.stop_event.is_set()
+                progress_state = (
+                    job.state,
+                    job.phase,
+                    job.error,
+                    job.completed_at,
+                    stop_requested,
+                    completed,
+                    classification_completed,
+                    classification_planned,
+                )
+                previous = job.last_persisted_progress_state
+                transition = previous is None or progress_state[:5] != previous[:5]
+                elapsed = (
+                    float("inf")
+                    if job.last_persisted_monotonic is None
+                    else now - job.last_persisted_monotonic
+                )
+                completed_delta = (
+                    overall_completed
+                    if previous is None
+                    else overall_completed - previous[5] - previous[6]
+                )
+                should_persist = (
+                    force
+                    or transition
+                    or elapsed >= self._checkpoint_min_interval_seconds
+                    or completed_delta >= self._checkpoint_min_completed_steps
+                )
+                if not should_persist:
+                    return False
+                summary = {
+                    "phase": job.phase,
+                    "completed_steps": completed,
+                    "planned_steps": planned,
+                    "classification_completed": classification_completed,
+                    "classification_planned": classification_planned,
+                    "stop_requested": stop_requested,
+                    "progress_percent": (
+                        100.0
+                        if job.state in TERMINAL_STATES
+                        else min(99.9, 100 * overall_completed / max(1, overall_planned))
+                    ),
+                }
+                if current_frequency_hz is not None:
+                    summary["current_frequency_hz"] = int(current_frequency_hz)
+                state = job.state
+                created_at = job.created_at
+                started_at = job.started_at
+                completed_at = job.completed_at
+                error = job.error
+            catalog.upsert_job(
+                job.job_id,
+                self._job_type(job),
+                state,
+                config=job.config,
+                summary=summary,
+                created_at=created_at,
+                started_at=started_at,
+                completed_at=completed_at,
+                error=error,
             )
-            overall_completed = completed + classification_completed
-            summary = {
-                "phase": job.phase,
-                "completed_steps": completed,
-                "planned_steps": planned,
-                "classification_completed": classification_completed,
-                "classification_planned": classification_planned,
-                "progress_percent": (
-                    100.0
-                    if job.state in TERMINAL_STATES
-                    else min(99.9, 100 * overall_completed / max(1, overall_planned))
-                ),
-            }
-            if current_frequency_hz is not None:
-                summary["current_frequency_hz"] = int(current_frequency_hz)
-            state = job.state
-            created_at = job.created_at
-            started_at = job.started_at
-            completed_at = job.completed_at
-            error = job.error
-        catalog.upsert_job(
-            job.job_id,
-            self._job_type(job),
-            state,
-            config=job.config,
-            summary=summary,
-            created_at=created_at,
-            started_at=started_at,
-            completed_at=completed_at,
-            error=error,
-        )
+            with self._lock:
+                job.last_persisted_monotonic = now
+                job.last_persisted_progress_state = progress_state
+            return True
 
     def _run(self, job: ScanJob) -> None:
-        ensure_data_dirs()
         with self._lock:
             job.state = "running"
             job.started_at = datetime.now(timezone.utc).isoformat()
         try:
-            self._checkpoint(job)
+            ensure_data_dirs()
+            self._checkpoint(job, force=True)
             for center_hz in job.centers_hz:
                 if job.stop_event.is_set():
                     break
@@ -314,6 +375,7 @@ class ScanManager:
             with self._lock:
                 job.completed_at = datetime.now(timezone.utc).isoformat()
             try:
+                self._checkpoint(job, force=True)
                 self._write_results(job)
             finally:
                 release_long_job(job.job_id)
@@ -359,7 +421,7 @@ class ScanManager:
         with self._lock:
             job.phase = "classifying"
             job.classification_total = len(candidates)
-        self._checkpoint(job)
+        self._checkpoint(job, force=True)
 
         for index, signal in enumerate(candidates, start=1):
             if job.stop_event.is_set():
@@ -432,7 +494,11 @@ class ScanManager:
                     Path(capture.path).unlink(missing_ok=True)
             with self._lock:
                 job.classifications.append(classification)
-            self._checkpoint(job, current_frequency_hz=frequency_hz)
+            self._checkpoint(
+                job,
+                current_frequency_hz=frequency_hz,
+                force=classification["status"] == "failed",
+            )
 
     def stop(self, job_id: str) -> dict:
         job = self._get(job_id)
@@ -440,6 +506,8 @@ class ScanManager:
             requested = job.state not in TERMINAL_STATES
             if requested:
                 job.stop_event.set()
+        if requested:
+            self._checkpoint(job, force=True)
         result = self.status(job_id)
         result["stop_requested"] = requested
         return result
