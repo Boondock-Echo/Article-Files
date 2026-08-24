@@ -201,7 +201,7 @@ class ScanManager:
                 job.thread = threading.Thread(
                     target=self._run,
                     args=(job,),
-                    name=f"rf-mcp-{job_id}",
+                    name=f"SDR-MCP-{job_id}",
                     daemon=True,
                 )
                 job.thread.start()

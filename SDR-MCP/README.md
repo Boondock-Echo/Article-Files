@@ -165,30 +165,30 @@ sudo reboot
 ```
 
 Do not continue until the appropriate hardware test works for the same user
-that will run `rf-mcp`.
+that will run `SDR-MCP`.
 
 ### 3. Put the release in the expected directory
 
 The service installer intentionally requires the project to be exactly
-`~/rf-mcp`. Use **one** of these methods.
+`~/SDR-MCP`. Use **one** of these methods.
 
 For the release ZIP, copy it to the Pi (for example, with `scp` from your other
 computer), then extract it:
 
 ```bash
-mkdir -p ~/rf-mcp
-unzip rf-mcp-multi-sdr-v1.0.1.zip -d ~/rf-mcp
-cd ~/rf-mcp
+mkdir -p ~/SDR-MCP
+unzip SDR-MCP-multi-sdr-v1.0.1.zip -d ~/SDR-MCP
+cd ~/SDR-MCP
 ```
 
 When working from this repository instead, copy the contents of `SDR-MCP` so
-that `pyproject.toml` is directly inside `~/rf-mcp`—not inside a second
+that `pyproject.toml` is directly inside `~/SDR-MCP`—not inside a second
 `SDR-MCP` directory:
 
 ```bash
-mkdir -p ~/rf-mcp
-cp -a /path/to/Article-Files/SDR-MCP/. ~/rf-mcp/
-cd ~/rf-mcp
+mkdir -p ~/SDR-MCP
+cp -a /path/to/Article-Files/SDR-MCP/. ~/SDR-MCP/
+cd ~/SDR-MCP
 ```
 
 Verify the layout before installing:
@@ -203,7 +203,7 @@ Use Debian's scientific Python packages through `--system-site-packages`; this
 avoids rebuilding NumPy and SciPy on the Pi:
 
 ```bash
-cd ~/rf-mcp
+cd ~/SDR-MCP
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -213,7 +213,7 @@ pytest -q
 ```
 
 All tests should pass. The editable install is intentional: the service runs
-the code in `~/rf-mcp`, and a future release can be installed over that same
+the code in `~/SDR-MCP`, and a future release can be installed over that same
 directory. Leave the environment with `deactivate` when desired.
 
 ### 5. Perform a local, interactive smoke test
@@ -221,9 +221,9 @@ directory. Leave the environment with `deactivate` when desired.
 Start the server bound only to the Pi itself:
 
 ```bash
-cd ~/rf-mcp
+cd ~/SDR-MCP
 source .venv/bin/activate
-rf-mcp
+SDR-MCP
 ```
 
 Keep that terminal open. In a second SSH session, check its public health
@@ -244,33 +244,33 @@ The systemd unit listens on all LAN interfaces, so configure authentication
 **before** enabling it:
 
 ```bash
-cd ~/rf-mcp
+cd ~/SDR-MCP
 chmod +x scripts/configure-auth.sh scripts/install-service.sh
 ./scripts/configure-auth.sh
 ./scripts/install-service.sh
 ```
 
 `configure-auth.sh` prints a bearer token and stores it in the root-readable
-file `/etc/rf-mcp.env`. Copy the token once into a password manager; do not put
+file `/etc/SDR-MCP.env`. Copy the token once into a password manager; do not put
 it in shell history, screenshots, source control, or chat. Running the script
 again rotates the token and restarts an existing service.
 
-The installer creates `~/rf-mcp-data`, installs the unit, and starts it as the
+The installer creates `~/SDR-MCP-data`, installs the unit, and starts it as the
 normal login user. Confirm startup:
 
 ```bash
-systemctl --no-pager --full status rf-mcp
+systemctl --no-pager --full status SDR-MCP
 curl --fail http://127.0.0.1:8765/healthz
-journalctl -u rf-mcp -n 50 --no-pager
+journalctl -u SDR-MCP -n 50 --no-pager
 ```
 
 The health response should say authentication is required. The systemd unit
 starts automatically after later reboots. Useful administration commands are:
 
 ```bash
-sudo systemctl restart rf-mcp
-sudo systemctl stop rf-mcp
-journalctl -u rf-mcp -f
+sudo systemctl restart SDR-MCP
+sudo systemctl stop SDR-MCP
+journalctl -u SDR-MCP -f
 ```
 
 ### 7. Find the Pi and open the dashboard
@@ -364,15 +364,15 @@ sudo reboot
 After reconnecting, run:
 
 ```bash
-systemctl is-active rf-mcp
+systemctl is-active SDR-MCP
 curl --fail http://127.0.0.1:8765/healthz
-journalctl -u rf-mcp -b --no-pager | tail -n 50
+journalctl -u SDR-MCP -b --no-pager | tail -n 50
 ```
 
 Reconnect MCP Inspector and repeat `list_devices`. If captures fail while the
 service itself is healthy, rerun `airspyhf_info` or `timeout 15 rtl_test -t` as
 the normal user after stopping the service. A `resource busy` result usually
-means the service already owns the receiver; stop `rf-mcp` before a direct
+means the service already owns the receiver; stop `SDR-MCP` before a direct
 hardware test and start it again afterward.
 
 ## Optional decoders
@@ -381,11 +381,11 @@ The basic spectrum, AM/SSB/CW/NFM, and broadcast-FM workflows do not require the
 optional decoder services. Add them only after the first capture succeeds:
 
 ```bash
-cd ~/rf-mcp
+cd ~/SDR-MCP
 ./scripts/install-wsjt-decoders.sh   # FT8, FT4, and WSPR
 ./scripts/install-fldigi-decoders.sh # Fldigi text modes
 ./scripts/install-sstv-decoder.sh    # SSTV images
-sudo systemctl restart rf-mcp
+sudo systemctl restart SDR-MCP
 ```
 
 Each installer may add sizable packages. Run only the scripts for features you
@@ -527,10 +527,10 @@ reimplementing their synchronization, LDPC/FEC, and protocol decoders. Install
 them once on MiniRackDisplay:
 
 ```bash
-cd ~/rf-mcp
+cd ~/SDR-MCP
 chmod +x scripts/install-wsjt-decoders.sh
 ./scripts/install-wsjt-decoders.sh
-sudo systemctl restart rf-mcp
+sudo systemctl restart SDR-MCP
 ```
 
 Call `list_digital_decoder_capabilities` to confirm that `jt9` and `wsprd` are
@@ -595,15 +595,15 @@ speaker or microphone.
 Install the local decoder service once:
 
 ```bash
-cd ~/rf-mcp
+cd ~/SDR-MCP
 chmod +x scripts/install-fldigi-decoders.sh
 ./scripts/install-fldigi-decoders.sh
-sudo systemctl restart rf-mcp
+sudo systemctl restart SDR-MCP
 ```
 
 The installer adds Fldigi, Xvfb, ALSA utilities, and the persistent loopback
-sound module. It starts `rf-mcp-fldigi.service` under the same unprivileged user
-as rf-mcp. XML-RPC listens only on `127.0.0.1:7362` and exposes a restricted
+sound module. It starts `SDR-MCP-fldigi.service` under the same unprivileged user
+as SDR-MCP. XML-RPC listens only on `127.0.0.1:7362` and exposes a restricted
 receive/control method allowlist; transmit methods are not exposed.
 
 Verify the pipeline with `get_fldigi_status`, followed by
@@ -650,20 +650,20 @@ correct.
 ### Decode SSTV images and browse the gallery
 
 Version 0.23 adds an asynchronous SSTV receiver around the mature
-`colaclanth/sstv` image decoder. rf-mcp performs the Airspy capture, USB or NFM
+`colaclanth/sstv` image decoder. SDR-MCP performs the Airspy capture, USB or NFM
 demodulation, independent VIS-code/parity detection, job management, artifact
 storage, and gallery indexing. Install the decoder into the project virtual
 environment once:
 
 ```bash
-cd ~/rf-mcp
+cd ~/SDR-MCP
 chmod +x scripts/install-sstv-decoder.sh
 ./scripts/install-sstv-decoder.sh
-sudo systemctl restart rf-mcp
+sudo systemctl restart SDR-MCP
 ```
 
 Version 0.23.1 also supplies a virtual terminal size to the upstream decoder.
-This is required when rf-mcp runs under systemd, where no interactive TTY is
+This is required when SDR-MCP runs under systemd, where no interactive TTY is
 attached; without it, the decoder's progress logger can raise `OSError 25`.
 
 Version 0.24 makes an ordinary quiet receive window a completed job with
@@ -791,7 +791,7 @@ alerts. Subscribe a destination to one SSTV rule with
 ```
 
 A destination may select one RF rule, one SSTV rule, or—if neither selector is
-given—all alert events. SSTV POST bodies use the `rf-mcp.sstv-alert.v1` schema.
+given—all alert events. SSTV POST bodies use the `SDR-MCP.sstv-alert.v1` schema.
 They include compact image metadata and an `image_download_path` such as
 `/artifacts/artifact-...`; image bytes and decoder logs are not embedded. The
 artifact endpoint requires the same bearer token as the RF web service when
@@ -905,7 +905,7 @@ To subscribe a destination only to one watch, call
 }
 ```
 
-These POST bodies use `rf-mcp.satellite-pass.v1` and share the existing HMAC
+These POST bodies use `SDR-MCP.satellite-pass.v1` and share the existing HMAC
 signature, durable outbox, bounded retries, delivery inspection, and private
 network safeguards. Deleting a watch retains its historical pass and alert
 records and makes a watch-only destination dormant.
@@ -928,7 +928,7 @@ image through MCP, and supplies an authenticated artifact download path.
 
 Set `doppler_correction_mode="digital"` on a satellite watch to apply the plan.
 The Airspy remains tuned to the nominal downlink with its normal wide 768 kS/s
-stream. rf-mcp interpolates the correction for every streamed chunk and moves
+stream. SDR-MCP interpolates the correction for every streamed chunk and moves
 the digital downconverter to the predicted received frequency. This avoids
 restarting `airspyhf_rx`, preserves mixer phase between correction steps, and
 does not introduce retune gaps into SSTV scan lines. Set the mode to `off` to
@@ -949,7 +949,7 @@ has a stable `downlink_id`, label, frequency, mode, receiver mode, priority,
 enabled flag, and audio-retention flag. Supported modes are `sstv`,
 `nfm_audio`, `ax25_afsk1200`, `ax25_g3ruh9600`, and `capture_only`.
 
-An Airspy HF+ is one receiver, so rf-mcp selects one enabled downlink for each
+An Airspy HF+ is one receiver, so SDR-MCP selects one enabled downlink for each
 pass. The `priority` policy always selects the lowest priority number; the
 `round_robin` policy rotates across upcoming passes. It does not claim
 simultaneous reception of separated frequencies. Each persisted pass records
@@ -1094,7 +1094,7 @@ or emitting an event. For example:
 
 Matching rules create durable `satellite_telemetry` alert events and enqueue
 deliveries for existing all-rule webhook destinations using payload schema
-`rf-mcp.satellite-telemetry-alert.v1`. A per-rule cooldown suppresses repeated
+`SDR-MCP.satellite-telemetry-alert.v1`. A per-rule cooldown suppresses repeated
 notifications while a value remains abnormal; zero disables suppression. Use
 `list_satellite_telemetry_alerts` and
 `acknowledge_satellite_telemetry_alert` to manage event history.
@@ -1415,7 +1415,7 @@ Start a five-minute monitor that samples WWV every five seconds:
 - `stop_monitor` to stop after the current capture.
 
 Only one monitor can run at a time. Jobs continue when an MCP client disconnects
-but do not yet survive a restart of the `rf-mcp` service. Completed JSON and PNG
+but do not yet survive a restart of the `SDR-MCP` service. Completed JSON and PNG
 artifacts remain on disk. Monitoring is limited to one hour and 1,000 captures
 per job. Enabling `record_audio_on_activity` can consume significant storage.
 
@@ -1812,7 +1812,7 @@ one is configured. When replacing a destination, omitting `signing_secret`
 preserves its existing secret.
 
 Each POST uses `Content-Type: application/json` and contains the complete alert
-event beneath a versioned `rf-mcp.alert.v1` envelope. Signed requests include:
+event beneath a versioned `SDR-MCP.alert.v1` envelope. Signed requests include:
 
 ```text
 X-RF-MCP-Event: alert-...
@@ -1835,7 +1835,7 @@ outbox, `retry_rf_webhook_delivery` to reset one delivery, and
 HTTPS public destinations are allowed by default. Private, loopback,
 link-local, and reserved addresses are rejected, and targets are validated
 again immediately before delivery. For a trusted HTTPS service on your LAN,
-add this to `/etc/rf-mcp.env` and restart the service:
+add this to `/etc/SDR-MCP.env` and restart the service:
 
 ```text
 RF_MCP_ALLOW_PRIVATE_WEBHOOKS=true
@@ -1869,7 +1869,7 @@ Version 0.6 adds these operational tools:
 - `get_storage_status` summarizes usage by artifact type;
 - `clean_old_artifacts` previews or removes old, unpinned artifacts.
 
-The catalog database is `~/rf-mcp-data/rf-mcp.sqlite3`. Jobs left queued or
+The catalog database is `~/SDR-MCP-data/SDR-MCP.sqlite3`. Jobs left queued or
 running when the service restarts are marked `interrupted`; completed artifacts
 remain available. Existing files from earlier versions are indexed as standalone
 artifacts when v0.6 starts.
@@ -1887,7 +1887,7 @@ Cleanup is deliberately conservative. First preview candidates:
 ```
 
 Actual deletion requires both `dry_run=false` and `confirm_delete=true`. Only
-unpinned files located beneath `~/rf-mcp-data` are eligible. The default inline
+unpinned files located beneath `~/SDR-MCP-data` are eligible. The default inline
 artifact limit is 10 MiB; larger artifacts remain cataloged but are not embedded
 in MCP results. Override it with `RF_MCP_MAX_INLINE_ARTIFACT_BYTES` if needed.
 
@@ -2149,7 +2149,7 @@ settings and select the receive action.
 Memories use conservative Airspy HF+ tuning-range validation. Broadcast FM is
 limited to 88–108 MHz and normalized to 200 kHz bandwidth. Other modes reuse
 the same bandwidth validation as `analyze_signal`. Memory metadata is stored
-atomically in `~/rf-mcp-data/station-memories.json`; it contains configuration
+atomically in `~/SDR-MCP-data/station-memories.json`; it contains configuration
 only, not IQ or audio content.
 
 ### Browser Broadcast FM and RDS
@@ -2331,7 +2331,7 @@ retained. Normal artifact retention and explicit cleanup rules still apply.
 Only do this after interactive and Inspector tests pass:
 
 ```bash
-cd ~/rf-mcp
+cd ~/SDR-MCP
 chmod +x scripts/install-service.sh
 ./scripts/install-service.sh
 ```
@@ -2339,9 +2339,9 @@ chmod +x scripts/install-service.sh
 Useful service commands:
 
 ```bash
-systemctl status rf-mcp
-journalctl -u rf-mcp -f
-sudo systemctl restart rf-mcp
+systemctl status SDR-MCP
+journalctl -u SDR-MCP -f
+sudo systemctl restart SDR-MCP
 ```
 
 ## Measurement behavior
@@ -2353,7 +2353,7 @@ sudo systemctl restart rf-mcp
   calibrated dBm.
 - IQ captures are deleted after analysis unless `retain_iq=true`.
 - Captures are serialized so two clients cannot claim the receiver at once.
-- Receiver leases are persisted in `rf-mcp-data/sdr-coordinator.sqlite3`, so a
+- Receiver leases are persisted in `SDR-MCP-data/sdr-coordinator.sqlite3`, so a
   second server process cannot claim hardware already in use. Capture leases
   expire after 30 minutes if their owner disappears; active streams renew their
   lease every 30 seconds.
@@ -2419,22 +2419,22 @@ is stopped (or schedule it as a low-priority post-start task):
 python -m rf_mcp.catalog reconcile
 ```
 
-Use `--data-dir /path/to/rf-mcp-data` when the catalog is not in the default
-`~/rf-mcp-data` directory. Newly generated artifacts are registered immediately;
+Use `--data-dir /path/to/SDR-MCP-data` when the catalog is not in the default
+`~/SDR-MCP-data` directory. Newly generated artifacts are registered immediately;
 the command is only needed to discover externally copied files, refresh changed
 file metadata, and remove catalog entries for files that no longer exist.
 
 ## Upgrade an existing installation
 
-The service is deliberately fixed to `~/rf-mcp`; do not extract a release into
+The service is deliberately fixed to `~/SDR-MCP`; do not extract a release into
 a version-suffixed directory. Assuming the downloaded ZIP is in your home
 directory, extract its project files directly into the existing installation:
 
 ```bash
 cd ~
-sudo systemctl stop rf-mcp
-unzip -o rf-mcp-multi-sdr-v1.0.1.zip -d rf-mcp
-cd ~/rf-mcp
+sudo systemctl stop SDR-MCP
+unzip -o SDR-MCP-multi-sdr-v1.0.1.zip -d SDR-MCP
+cd ~/SDR-MCP
 source .venv/bin/activate
 python -m pip install -e .
 pytest -q

@@ -69,7 +69,7 @@ def score_satellite_pass(pass_record: dict, observations: list[dict],
         confidence = "medium" if observations else "low"
     downlink = pass_record.get("selected_downlink") or {}
     return {
-        "schema": "rf-mcp.satellite-pass-performance.v1",
+        "schema": "SDR-MCP.satellite-pass-performance.v1",
         "pass_id": pass_record["pass_id"], "watch_id": pass_record.get("watch_id"),
         "satellite_name": pass_record["satellite_name"], "state": pass_record["state"],
         "aos_at": pass_record["aos_at"],

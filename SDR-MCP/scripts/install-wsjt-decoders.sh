@@ -19,4 +19,4 @@ if [[ "$missing" -ne 0 ]]; then
   exit 1
 fi
 
-echo "WSJT-X command-line decoders are ready. Restart rf-mcp before use."
+echo "WSJT-X command-line decoders are ready. Restart SDR-MCP before use."

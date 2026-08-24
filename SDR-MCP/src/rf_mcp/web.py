@@ -192,7 +192,7 @@ class RfWebApp:
                 _json_bytes(
                     {
                         "status": "ok",
-                        "service": "rf-mcp",
+                        "service": "SDR-MCP",
                         "version": self.version,
                         "authentication_required": self.token is not None,
                     }

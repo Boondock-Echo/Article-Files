@@ -29,7 +29,7 @@ def _cache_path() -> Path:
 
 
 def _download_json(url: str, timeout_seconds: float = 12.0):
-    request = Request(url, headers={"User-Agent": "rf-mcp-propagation/0.50"})
+    request = Request(url, headers={"User-Agent": "SDR-MCP-propagation/0.50"})
     with urlopen(request, timeout=max(3.0, min(float(timeout_seconds), 30.0))) as response:  # noqa: S310
         if getattr(response, "status", 200) != 200:
             raise RuntimeError(f"NOAA SWPC returned HTTP {response.status}")

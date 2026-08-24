@@ -164,7 +164,7 @@ class SatelliteReceiverManager:
             telemetry = decode_observation_telemetry(catalog, observation)
             observation["telemetry_value_count"] = telemetry["value_count"]
             observation["telemetry_decode_failures"] = telemetry["failures"]
-            job.result = {**observation, "schema": "rf-mcp.satellite-observation.v1"}
+            job.result = {**observation, "schema": "SDR-MCP.satellite-observation.v1"}
             result_path.write_text(json.dumps(job.result, indent=2) + "\n", encoding="utf-8")
             catalog.register_artifact(result_path, "satellite_result_json", job_id=job.job_id)
             job.state = outcome

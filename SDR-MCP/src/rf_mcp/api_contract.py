@@ -39,7 +39,7 @@ COMPATIBILITY_RULES = {
 
 def contract_document(server_version: str) -> dict:
     return {
-        "schema": "rf-mcp.api-contract.v1",
+        "schema": "SDR-MCP.api-contract.v1",
         "api_version": API_VERSION,
         "server_version": server_version,
         "stability": API_STABILITY,

@@ -4,7 +4,7 @@ set -euo pipefail
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ ! -x "$project_dir/.venv/bin/python" ]]; then
-  echo "Expected rf-mcp virtual environment at $project_dir/.venv" >&2
+  echo "Expected SDR-MCP virtual environment at $project_dir/.venv" >&2
   exit 1
 fi
 
@@ -20,4 +20,4 @@ if [[ ! -x "$project_dir/.venv/bin/sstv" ]]; then
 fi
 
 "$project_dir/.venv/bin/sstv" --help >/dev/null
-echo "SSTV WAV decoder is ready. Restart rf-mcp before use."
+echo "SSTV WAV decoder is ready. Restart SDR-MCP before use."
