@@ -158,6 +158,47 @@ def test_dashboard_navigation_restores_history_and_active_semantics():
         assert f"'{legacy_hash}'" in script
 
 
+def test_dashboard_exposes_accessible_status_and_progress_semantics():
+    assets = resources.files("rf_mcp").joinpath("assets")
+    document = assets.joinpath("dashboard.html").read_text(encoding="utf-8")
+    script = assets.joinpath("dashboard.js").read_text(encoding="utf-8")
+
+    assert 'id="error" role="alert"' in document
+    assert "receiverBar.setAttribute('role','status')" in script
+    assert "region.setAttribute('aria-live','polite')" in script
+    assert "status.setAttribute('aria-live','polite')" in script
+    assert "document.createElement('progress')" in script
+    assert "track.max=100;track.value=pct" in script
+    assert "progress.max=100;progress.value=pct" in script
+    assert "setAttribute('aria-label',jobLabel" in script
+
+
+def test_activity_drawer_has_dialog_and_keyboard_semantics():
+    script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'aria-expanded="false" aria-controls="activityDrawer"' in script
+    assert "activityDrawer.setAttribute('role','dialog')" in script
+    assert "activityDrawer.setAttribute('aria-labelledby','activityDrawerTitle')" in script
+    assert "activityTrigger.setAttribute('aria-expanded',String(open))" in script
+    assert "if(open)activityDrawer.focus();else activityTrigger.focus()" in script
+    assert "if(event.key==='Escape')" in script
+    assert "setActivityDrawer(false)" in script
+
+
+def test_dashboard_supports_keyboard_focus_and_reduced_motion():
+    stylesheet = resources.files("rf_mcp").joinpath("assets/dashboard.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert "a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible" in stylesheet
+    assert "@media (prefers-reduced-motion: reduce)" in stylesheet
+    assert 'button[aria-busy="true"]::before{animation:none!important}' in stylesheet
+    assert ".fmChannel.current{animation:none!important}" in stylesheet
+    assert "transition:none!important" in stylesheet
+
+
 def test_dashboard_without_auth_serves_html_and_json(tmp_path, monkeypatch):
     from rf_mcp import sdr_coordinator
     monkeypatch.setattr(sdr_coordinator, "DATA_DIR", tmp_path)
