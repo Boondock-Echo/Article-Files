@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
+import heapq
+from itertools import islice
 from pathlib import Path
+from typing import Iterator
 
 import matplotlib
 matplotlib.use("Agg")
@@ -39,23 +43,100 @@ def _range(result: dict) -> tuple[float, float]:
 
 
 def _classifications(result: dict, signals: list[dict], tolerance_hz: float) -> dict[int, dict]:
-    completed = [
-        item
-        for item in result.get("classifications", [])
-        if item.get("status") == "completed" and item.get("frequency_hz") is not None
-    ]
+    completed = sorted(
+        (
+            (float(item["frequency_hz"]), index, item)
+            for index, item in enumerate(result.get("classifications", []))
+            if item.get("status") == "completed" and item.get("frequency_hz") is not None
+        ),
+        key=lambda entry: (entry[0], entry[1]),
+    )
+    completed_frequencies = [entry[0] for entry in completed]
+    sorted_signals = sorted(
+        ((float(signal["frequency_hz"]), index) for index, signal in enumerate(signals)),
+        key=lambda entry: (entry[0], entry[1]),
+    )
     mapping: dict[int, dict] = {}
-    for signal_index, signal in enumerate(signals):
-        frequency = float(signal["frequency_hz"])
-        candidates = [
-            item for item in completed if abs(float(item["frequency_hz"]) - frequency) <= tolerance_hz
-        ]
-        if candidates:
-            mapping[signal_index] = min(
-                candidates,
-                key=lambda item: abs(float(item["frequency_hz"]) - frequency),
+    for frequency, signal_index in sorted_signals:
+        start = bisect_left(completed_frequencies, frequency - tolerance_hz)
+        stop = bisect_right(completed_frequencies, frequency + tolerance_hz)
+        if start < stop:
+            # Preserve stable-min behavior explicitly with the original classification index.
+            _, _, item = min(
+                islice(completed, start, stop),
+                key=lambda entry: (abs(entry[0] - frequency), entry[1]),
             )
+            mapping[signal_index] = item
     return mapping
+
+
+def _frequency_candidate_pairs(
+    left_signals: list[dict], right_signals: list[dict], tolerance_hz: float
+) -> Iterator[tuple[float, int, int]]:
+    """Yield the old greedy sort order without storing the frequency cross product."""
+    left = sorted(
+        ((float(signal["frequency_hz"]), index) for index, signal in enumerate(left_signals)),
+        key=lambda entry: (entry[0], entry[1]),
+    )
+    sorted_right = sorted(
+        ((float(signal["frequency_hz"]), index) for index, signal in enumerate(right_signals)),
+        key=lambda entry: (entry[0], entry[1]),
+    )
+    right_groups: list[tuple[float, list[int]]] = []
+    for frequency, index in sorted_right:
+        if not right_groups or right_groups[-1][0] != frequency:
+            right_groups.append((frequency, []))
+        right_groups[-1][1].append(index)
+    right_frequencies = [frequency for frequency, _ in right_groups]
+
+    def candidates(left_frequency: float, left_index: int, start: int, stop: int):
+        # Merge the two frequency fronts; each duplicate group is already index ordered.
+        insertion = bisect_left(right_frequencies, left_frequency, start, stop)
+        lower = insertion - 1
+        upper = insertion
+        while lower >= start or upper < stop:
+            lower_distance = (
+                left_frequency - right_frequencies[lower]
+                if lower >= start
+                else float("inf")
+            )
+            upper_distance = (
+                right_frequencies[upper] - left_frequency
+                if upper < stop
+                else float("inf")
+            )
+            distance = min(lower_distance, upper_distance)
+            groups = []
+            if lower_distance == distance:
+                groups.append(right_groups[lower][1])
+                lower -= 1
+            if upper_distance == distance:
+                groups.append(right_groups[upper][1])
+                upper += 1
+            # Two equidistant groups require an explicit original-index merge.
+            for right_index in heapq.merge(*groups):
+                yield distance, left_index, right_index
+
+    streams = []
+    queue: list[tuple[float, int, int, int]] = []
+    for left_frequency, left_index in left:
+        start = bisect_left(right_frequencies, left_frequency - tolerance_hz)
+        stop = bisect_right(right_frequencies, left_frequency + tolerance_hz)
+        if start == stop:
+            continue
+        stream_index = len(streams)
+        stream = candidates(left_frequency, left_index, start, stop)
+        streams.append(stream)
+        distance, candidate_left, candidate_right = next(stream)
+        heapq.heappush(queue, (distance, candidate_left, candidate_right, stream_index))
+    while queue:
+        distance, left_index, right_index, stream_index = heapq.heappop(queue)
+        yield distance, left_index, right_index
+        try:
+            next_distance, next_left, next_right = next(streams[stream_index])
+        except StopIteration:
+            continue
+        heapq.heappush(queue, (next_distance, next_left, next_right, stream_index))
 
 
 def compare_survey_results(
@@ -109,18 +190,12 @@ def compare_survey_results(
     power_scale = "digital_power_dbfs_10khz" if use_digital_power else "legacy_relative_db"
     power_change_label = "digital_power_changed" if use_digital_power else "relative_power_changed"
 
-    candidate_pairs = []
-    for left_index, left in enumerate(baseline_signals):
-        for right_index, right in enumerate(comparison_signals):
-            distance = abs(float(right["frequency_hz"]) - float(left["frequency_hz"]))
-            if distance <= frequency_tolerance_hz:
-                candidate_pairs.append((distance, left_index, right_index))
-    candidate_pairs.sort()
-
     used_left: set[int] = set()
     used_right: set[int] = set()
     matched: list[dict] = []
-    for _, left_index, right_index in candidate_pairs:
+    for _, left_index, right_index in _frequency_candidate_pairs(
+        baseline_signals, comparison_signals, frequency_tolerance_hz
+    ):
         if left_index in used_left or right_index in used_right:
             continue
         used_left.add(left_index)
