@@ -126,6 +126,38 @@ def test_dashboard_assets_are_packaged_and_have_stable_landmarks():
     assert "uxStyle" not in script
 
 
+def test_dashboard_navigation_is_grouped_and_accessible():
+    assets = resources.files("rf_mcp").joinpath("assets")
+    script = assets.joinpath("dashboard.js").read_text(encoding="utf-8")
+    stylesheet = assets.joinpath("dashboard.css").read_text(encoding="utf-8")
+
+    for category in ("Overview", "Receive", "Analyze", "Automation", "Administration"):
+        assert category in script
+    assert "aria-label','Dashboard" in script
+    assert "aria-controls','dashboardNav" in script
+    assert "aria-expanded','false" in script
+    assert ".dashboard-nav-toggle{display:none" in stylesheet
+    assert "@media(max-width:700px)" in stylesheet
+    assert ".dashboard-nav.open{display:grid" in stylesheet
+
+
+def test_dashboard_navigation_restores_history_and_active_semantics():
+    script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "setAttribute('aria-current','page')" in script
+    assert "removeAttribute('aria-current')" in script
+    assert "document.title=`${viewTitles[id]} · MiniRackDisplay`" in script
+    assert "history.pushState({view:id}" in script
+    assert "window.addEventListener('popstate',restoreHashView)" in script
+    assert "window.addEventListener('hashchange',restoreHashView)" in script
+    assert "showView(location.hash.slice(1)||'home',{updateHistory:false})" in script
+    assert "heading.focus()" in script
+    for legacy_hash in ("listen", "scan", "system"):
+        assert f"'{legacy_hash}'" in script
+
+
 def test_dashboard_without_auth_serves_html_and_json(tmp_path, monkeypatch):
     from rf_mcp import sdr_coordinator
     monkeypatch.setattr(sdr_coordinator, "DATA_DIR", tmp_path)
