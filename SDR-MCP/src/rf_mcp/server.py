@@ -4300,6 +4300,7 @@ def main() -> None:
         satellite_scheduler.stop()
         scheduler_manager.stop()
         webhook_dispatcher.stop()
+        catalog.close()
 
 
 if __name__ == "__main__":
