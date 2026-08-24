@@ -26,20 +26,63 @@ class Catalog:
         self.data_dir = Path(data_dir).resolve()
         self.database_path = self.data_dir / "rf-mcp.sqlite3"
         self._lock = threading.RLock()
+        self._local = threading.local()
+        self._connections: set[sqlite3.Connection] = set()
+        self._connections_lock = threading.Lock()
+        self._closed = False
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._initialize()
         if index_existing:
             self.index_existing_artifacts()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA journal_mode=WAL")
+        """Return the current thread's connection.
+
+        Connections are deliberately reused: opening SQLite and negotiating WAL for
+        every catalog operation is expensive.  ``close`` may run on the application
+        thread after workers have stopped, hence ``check_same_thread=False``; normal
+        use remains strictly one connection per thread.
+        """
+        if self._closed:
+            raise RuntimeError("Catalog is closed")
+        connection = getattr(self._local, "connection", None)
+        if connection is None:
+            connection = sqlite3.connect(
+                self.database_path, timeout=30, check_same_thread=False
+            )
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA busy_timeout=30000")
+            self._local.connection = connection
+            with self._connections_lock:
+                if self._closed:
+                    connection.close()
+                    raise RuntimeError("Catalog is closed")
+                self._connections.add(connection)
         return connection
+
+    def close(self) -> None:
+        """Close every connection owned by this catalog instance."""
+        with self._connections_lock:
+            self._closed = True
+            connections = tuple(self._connections)
+            self._connections.clear()
+        for connection in connections:
+            connection.close()
+        self._local.__dict__.clear()
+
+    def __enter__(self) -> Catalog:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
 
     def _initialize(self) -> None:
         with self._lock, self._connect() as connection:
+            # Persistent/database-wide settings belong here, not in _connect().
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=NORMAL")
+            connection.execute("PRAGMA wal_autocheckpoint=1000")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -569,7 +612,7 @@ class Catalog:
             connection.execute(f"PRAGMA user_version={CATALOG_SCHEMA_VERSION}")
 
     def schema_status(self) -> dict:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             rows = connection.execute(
                 "SELECT version,name,applied_at FROM schema_migrations ORDER BY version"
@@ -645,7 +688,7 @@ class Catalog:
         return self.get_satellite_watch(watch_id)
 
     def get_satellite_watch(self, watch_id_or_name: str) -> dict:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM satellite_watches WHERE watch_id=? OR name=? COLLATE NOCASE",
                 (watch_id_or_name, watch_id_or_name),
@@ -659,7 +702,7 @@ class Catalog:
         where, values = "", []
         if enabled is not None:
             where, values = " WHERE enabled=?", [1 if enabled else 0]
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM satellite_watches{where} ORDER BY name COLLATE NOCASE LIMIT ?",
                 (*values, max(1, min(int(limit), 500))),
@@ -696,7 +739,7 @@ class Catalog:
         return watch
 
     def due_satellite_tle_refreshes(self, now: str, *, limit: int = 20) -> list[dict]:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM satellite_watches WHERE enabled=1 AND auto_refresh=1 "
                 "AND tle_source='celestrak' AND (next_tle_refresh_at IS NULL OR "
@@ -811,7 +854,7 @@ class Catalog:
         return self.get_satellite_pass(pass_id)
 
     def get_satellite_pass(self, pass_id: str) -> dict:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             row = connection.execute("SELECT * FROM satellite_passes WHERE pass_id=?", (pass_id,)).fetchone()
         if row is None:
             raise ValueError(f"Unknown satellite pass_id: {pass_id}")
@@ -822,7 +865,7 @@ class Catalog:
     ) -> dict:
         self.get_satellite_pass(pass_id)
         safe_path = str(self._safe_path(path))
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 "UPDATE satellite_passes SET doppler_plot_path=?,doppler_artifact_id=?,"
                 "updated_at=? WHERE pass_id=?",
@@ -839,7 +882,7 @@ class Catalog:
         if state:
             clauses.append("state=?"); values.append(state)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM satellite_passes{where} ORDER BY start_at "
                 f"{'DESC' if newest_first else 'ASC'} LIMIT ?",
@@ -848,7 +891,7 @@ class Catalog:
         return [self._satellite_pass_row(row) for row in rows]
 
     def due_satellite_passes(self, now: str, *, limit: int = 10) -> list[dict]:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM satellite_passes WHERE state='planned' AND start_at<=? "
                 "ORDER BY start_at LIMIT ?", (now, max(1, min(int(limit), 100))),
@@ -856,7 +899,7 @@ class Catalog:
         return [self._satellite_pass_row(row) for row in rows]
 
     def due_satellite_pass_notifications(self, now: str, *, limit: int = 20) -> list[dict]:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM satellite_passes WHERE state='planned' "
                 "AND prepass_event_id IS NULL AND notify_at IS NOT NULL AND notify_at<=? "
@@ -868,7 +911,7 @@ class Catalog:
     def record_satellite_pass(self, pass_id: str, *, state: str,
                               job_id: str | None = None, error: str | None = None) -> dict:
         self.get_satellite_pass(pass_id)
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 "UPDATE satellite_passes SET state=?,job_id=?,error=?,updated_at=? WHERE pass_id=?",
                 (state, job_id, error, utc_now(), pass_id),
@@ -887,7 +930,7 @@ class Catalog:
                        if result.get("result_json_path") else None)
         audio_path = (str(self._safe_path(result["audio_path"]))
                       if result.get("audio_path") else None)
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 "INSERT INTO satellite_observations (observation_id,job_id,pass_id,watch_id,"
                 "satellite_name,downlink_id,downlink_label,mode,nominal_frequency_hz,outcome,"
@@ -904,7 +947,7 @@ class Catalog:
         return self.get_satellite_observation(observation_id)
 
     def get_satellite_observation(self, observation_id: str) -> dict:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM satellite_observations WHERE observation_id=?",
                 (observation_id,),
@@ -924,7 +967,7 @@ class Catalog:
                 clauses.append(f"{column}=?")
                 values.append(value)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM satellite_observations{where} "
                 "ORDER BY captured_at DESC LIMIT ?", (*values, max(1, min(int(limit), 500))),
@@ -933,7 +976,7 @@ class Catalog:
 
     def satellite_activity_summary(self, *, watch_id: str | None = None) -> dict:
         where, values = (" WHERE watch_id=?", (watch_id,)) if watch_id else ("", ())
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             totals = connection.execute(
                 "SELECT COUNT(*) observations,COALESCE(SUM(packet_count),0) packet_count,"
                 "COALESCE(SUM(valid_packet_count),0) valid_packet_count,MIN(captured_at) first_at,"
@@ -1000,7 +1043,7 @@ class Catalog:
         return self.get_satellite_telemetry_schema(schema_id)
 
     def get_satellite_telemetry_schema(self, schema_id_or_name: str) -> dict:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM satellite_telemetry_schemas WHERE schema_id=? "
                 "OR name=? COLLATE NOCASE", (schema_id_or_name, schema_id_or_name),
@@ -1012,7 +1055,7 @@ class Catalog:
     def list_satellite_telemetry_schemas(self, *, enabled: bool | None = None,
                                          limit: int = 100) -> list[dict]:
         where, values = (" WHERE enabled=?", (1 if enabled else 0,)) if enabled is not None else ("", ())
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM satellite_telemetry_schemas{where} "
                 "ORDER BY name COLLATE NOCASE LIMIT ?", (*values, max(1, min(int(limit), 500))),
@@ -1021,7 +1064,7 @@ class Catalog:
 
     def delete_satellite_telemetry_schema(self, schema_id_or_name: str) -> dict:
         schema = self.get_satellite_telemetry_schema(schema_id_or_name)
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute("DELETE FROM satellite_telemetry_schemas WHERE schema_id=?",
                                (schema["schema_id"],))
         return schema
@@ -1029,7 +1072,7 @@ class Catalog:
     def add_satellite_telemetry_values(self, values: list[dict]) -> list[dict]:
         inserted = []
         now = utc_now()
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             for item in values:
                 value_id = item.get("value_id") or f"telvalue-{uuid4().hex}"
                 connection.execute(
@@ -1056,7 +1099,7 @@ class Catalog:
             if value is not None:
                 clauses.append(f"{column}=?"); values.append(value)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM satellite_telemetry_values{where} "
                 "ORDER BY captured_at DESC LIMIT ?", (*values, max(1, min(int(limit), 5000))),
@@ -1064,7 +1107,7 @@ class Catalog:
         return [dict(row) for row in rows]
 
     def previous_satellite_telemetry_value(self, value: dict) -> dict | None:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM satellite_telemetry_values WHERE schema_id=? AND field_name=? "
                 "AND observation_id<>? AND captured_at<=? ORDER BY captured_at DESC LIMIT 1",
@@ -1113,7 +1156,7 @@ class Catalog:
         return self.get_satellite_telemetry_alert_rule(rule_id)
 
     def get_satellite_telemetry_alert_rule(self, rule_id_or_name: str) -> dict:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM satellite_telemetry_alert_rules WHERE rule_id=? "
                 "OR name=? COLLATE NOCASE", (rule_id_or_name, rule_id_or_name),
@@ -1133,7 +1176,7 @@ class Catalog:
             if value is not None:
                 clauses.append(f"{column}=?"); values.append(value)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM satellite_telemetry_alert_rules{where} "
                 "ORDER BY name COLLATE NOCASE LIMIT ?", (*values, max(1, min(int(limit), 500))),
@@ -1142,7 +1185,7 @@ class Catalog:
 
     def delete_satellite_telemetry_alert_rule(self, rule_id_or_name: str) -> dict:
         rule = self.get_satellite_telemetry_alert_rule(rule_id_or_name)
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute("DELETE FROM satellite_telemetry_alert_rules WHERE rule_id=?",
                                (rule["rule_id"],))
         return rule
@@ -1230,7 +1273,7 @@ class Catalog:
         image_id = result.get("image_id") or f"sstv-{uuid4().hex}"
         image_path = str(self._safe_path(result["image_path"]))
         audio_path = str(self._safe_path(result["audio_path"])) if result.get("audio_path") else None
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO sstv_images (
@@ -1255,7 +1298,7 @@ class Catalog:
         return self.get_sstv_image(image_id)
 
     def get_sstv_image(self, image_id: str) -> dict:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM sstv_images WHERE image_id=?", (image_id,)
             ).fetchone()
@@ -1286,7 +1329,7 @@ class Catalog:
             values.append(source_satellite_pass_id)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         limit = max(1, min(int(limit), 500))
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM sstv_images{where} "  # noqa: S608
                 "ORDER BY captured_at DESC LIMIT ?", (*values, limit),
@@ -1299,7 +1342,7 @@ class Catalog:
     ) -> dict | None:
         if not image_hash:
             return None
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM sstv_images WHERE frequency_hz=? AND image_hash IS NOT NULL "
                 "ORDER BY captured_at DESC LIMIT ?",
@@ -1317,7 +1360,7 @@ class Catalog:
     def sstv_activity_summary(self, *, since: str | None = None) -> dict:
         where = " WHERE captured_at>=?" if since else ""
         values = (since,) if since else ()
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             totals = connection.execute(
                 "SELECT COUNT(*) AS images, "
                 "SUM(CASE WHEN duplicate_of IS NULL THEN 1 ELSE 0 END) AS unique_images, "
@@ -1352,7 +1395,7 @@ class Catalog:
 
     def add_fldigi_decode(self, result: dict) -> dict:
         decode_id = result.get("decode_id") or f"fldigi-{uuid4().hex}"
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO fldigi_decodes (
@@ -1382,7 +1425,7 @@ class Catalog:
             values.append(int(dial_frequency_hz))
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         limit = max(1, min(int(limit), 1000))
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM fldigi_decodes{where} "  # noqa: S608
                 "ORDER BY captured_at DESC LIMIT ?", (*values, limit),
@@ -1397,7 +1440,7 @@ class Catalog:
 
     def add_weak_signal_spots(self, spots: list[dict], *, job_id: str) -> list[dict]:
         inserted = []
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             for spot in spots:
                 spot_id = spot.get("spot_id") or f"spot-{uuid4().hex}"
                 values = {**spot, "spot_id": spot_id, "job_id": job_id}
@@ -1437,7 +1480,7 @@ class Catalog:
             values.append(int(dial_frequency_hz))
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         limit = max(1, min(int(limit), 1000))
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM weak_signal_spots{where} "  # noqa: S608
                 "ORDER BY captured_at DESC LIMIT ?", (*values, limit),
@@ -1510,7 +1553,7 @@ class Catalog:
         return self.get_fm_station(frequency_hz)
 
     def get_fm_station(self, frequency_hz: int) -> dict:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM fm_stations WHERE frequency_hz=?", (int(frequency_hz),)
             ).fetchone()
@@ -1521,7 +1564,7 @@ class Catalog:
     def list_fm_stations(self, *, rds_only: bool = False, limit: int = 200) -> list[dict]:
         limit = max(1, min(int(limit), 500))
         where = " WHERE pi_code IS NOT NULL" if rds_only else ""
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM fm_stations{where} ORDER BY frequency_hz LIMIT ?",  # noqa: S608
                 (limit,),
@@ -1555,7 +1598,7 @@ class Catalog:
         safe_result = None
         if result_json_path is not None:
             safe_result = str(self._safe_path(result_json_path, must_exist=False))
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO jobs (
@@ -1588,7 +1631,7 @@ class Catalog:
 
     def mark_interrupted_jobs(self) -> int:
         now = utc_now()
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE jobs
@@ -1656,7 +1699,7 @@ class Catalog:
         return self.get_preset(preset_id)
 
     def get_preset(self, preset_id_or_name: str) -> dict:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM presets WHERE preset_id=?",
                 (preset_id_or_name,),
@@ -1672,7 +1715,7 @@ class Catalog:
 
     def list_presets(self, *, preset_type: str | None = None, limit: int = 100) -> list[dict]:
         limit = max(1, min(int(limit), 200))
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             if preset_type:
                 rows = connection.execute(
                     """
@@ -1691,7 +1734,7 @@ class Catalog:
     def delete_preset(self, preset_id_or_name: str) -> dict:
         preset = self.get_preset(preset_id_or_name)
         try:
-            with self._lock, self._connect() as connection:
+            with self._connect() as connection:
                 connection.execute(
                     "DELETE FROM presets WHERE preset_id=?", (preset["preset_id"],)
                 )
@@ -1772,7 +1815,7 @@ class Catalog:
                    presets.preset_type AS preset_type
             FROM schedules JOIN presets USING(preset_id)
         """
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 query + " WHERE schedule_id=?", (schedule_id_or_name,)
             ).fetchone()
@@ -1797,7 +1840,7 @@ class Catalog:
             values.append(1 if enabled else 0)
         query += " ORDER BY schedules.next_run_at, schedules.name COLLATE NOCASE LIMIT ?"
         values.append(limit)
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(query, values).fetchall()
         return [self._schedule_row(row) for row in rows]
 
@@ -1809,12 +1852,12 @@ class Catalog:
             WHERE schedules.enabled=1 AND schedules.next_run_at <= ?
             ORDER BY schedules.next_run_at LIMIT ?
         """
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(query, (now, max(1, min(limit, 100)))).fetchall()
         return [self._schedule_row(row) for row in rows]
 
     def advance_schedule(self, schedule_id: str, *, attempted_at: str, next_run_at: str) -> None:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE schedules
@@ -1833,7 +1876,7 @@ class Catalog:
         job_id: str | None = None,
         error: str | None = None,
     ) -> dict:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE schedules
@@ -1850,7 +1893,7 @@ class Catalog:
     ) -> dict:
         schedule = self.get_schedule(schedule_id_or_name)
         now = utc_now()
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE schedules SET enabled=?, next_run_at=?, updated_at=?
@@ -1862,7 +1905,7 @@ class Catalog:
 
     def delete_schedule(self, schedule_id_or_name: str) -> dict:
         schedule = self.get_schedule(schedule_id_or_name)
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 "DELETE FROM schedules WHERE schedule_id=?", (schedule["schedule_id"],)
             )
@@ -1953,7 +1996,7 @@ class Catalog:
             SELECT alert_rules.*, schedules.name AS schedule_name
             FROM alert_rules JOIN schedules USING(schedule_id)
         """
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 query + " WHERE rule_id=?", (rule_id_or_name,)
             ).fetchone()
@@ -1987,13 +2030,13 @@ class Catalog:
             FROM alert_rules JOIN schedules USING(schedule_id)
         """ + where + " ORDER BY alert_rules.name COLLATE NOCASE LIMIT ?"
         values.append(limit)
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(query, values).fetchall()
         return [self._alert_rule_row(row) for row in rows]
 
     def set_alert_rule_enabled(self, rule_id_or_name: str, enabled: bool) -> dict:
         rule = self.get_alert_rule(rule_id_or_name)
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 "UPDATE alert_rules SET enabled=?, updated_at=? WHERE rule_id=?",
                 (1 if enabled else 0, utc_now(), rule["rule_id"]),
@@ -2002,7 +2045,7 @@ class Catalog:
 
     def delete_alert_rule(self, rule_id_or_name: str) -> dict:
         rule = self.get_alert_rule(rule_id_or_name)
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute("DELETE FROM alert_rules WHERE rule_id=?", (rule["rule_id"],))
         return rule
 
@@ -2011,7 +2054,7 @@ class Catalog:
     ) -> dict:
         event_id = f"alert-{uuid4().hex}"
         now = utc_now()
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO alert_events (
@@ -2043,7 +2086,7 @@ class Catalog:
         return result
 
     def get_alert_event(self, event_id: str) -> dict:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM alert_events WHERE event_id=?", (event_id,)
             ).fetchone()
@@ -2073,7 +2116,7 @@ class Catalog:
             clauses.append("event_type=?")
             values.append(event_type)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM alert_events{where} ORDER BY created_at DESC LIMIT ?",  # noqa: S608
                 (*values, limit),
@@ -2082,7 +2125,7 @@ class Catalog:
 
     def acknowledge_alert_event(self, event_id: str) -> dict:
         self.get_alert_event(event_id)
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 "UPDATE alert_events SET acknowledged_at=COALESCE(acknowledged_at, ?) "
                 "WHERE event_id=?",
@@ -2138,7 +2181,7 @@ class Catalog:
         return self.get_sstv_alert_rule(rule_id)
 
     def get_sstv_alert_rule(self, rule_id_or_name: str) -> dict:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM sstv_alert_rules WHERE rule_id=?", (rule_id_or_name,)
             ).fetchone()
@@ -2156,7 +2199,7 @@ class Catalog:
     ) -> list[dict]:
         where = " WHERE enabled=?" if enabled is not None else ""
         values = [1 if enabled else 0] if enabled is not None else []
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM sstv_alert_rules{where} "  # noqa: S608
                 "ORDER BY name COLLATE NOCASE LIMIT ?",
@@ -2166,7 +2209,7 @@ class Catalog:
 
     def set_sstv_alert_rule_enabled(self, rule_id_or_name: str, enabled: bool) -> dict:
         rule = self.get_sstv_alert_rule(rule_id_or_name)
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 "UPDATE sstv_alert_rules SET enabled=?, updated_at=? WHERE rule_id=?",
                 (1 if enabled else 0, utc_now(), rule["rule_id"]),
@@ -2194,7 +2237,7 @@ class Catalog:
             "rule": rule,
             "image": image,
         }
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO alert_events (
@@ -2287,7 +2330,7 @@ class Catalog:
     def get_webhook_destination(
         self, destination_id_or_name: str, *, include_secret: bool = False
     ) -> dict:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM webhook_destinations WHERE destination_id=?",
                 (destination_id_or_name,),
@@ -2305,7 +2348,7 @@ class Catalog:
         limit = max(1, min(int(limit), 200))
         where = " WHERE enabled=?" if enabled is not None else ""
         values = [1 if enabled else 0] if enabled is not None else []
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM webhook_destinations{where} ORDER BY name COLLATE NOCASE LIMIT ?",  # noqa: S608
                 (*values, limit),
@@ -2314,7 +2357,7 @@ class Catalog:
 
     def set_webhook_destination_enabled(self, destination_id_or_name: str, enabled: bool) -> dict:
         destination = self.get_webhook_destination(destination_id_or_name)
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 "UPDATE webhook_destinations SET enabled=?, updated_at=? WHERE destination_id=?",
                 (1 if enabled else 0, utc_now(), destination["destination_id"]),
@@ -2398,7 +2441,7 @@ class Catalog:
             LEFT JOIN webhook_destinations USING(destination_id)
             WHERE delivery_id=?
         """
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             row = connection.execute(query, (delivery_id,)).fetchone()
         if row is None:
             raise ValueError(f"Unknown webhook delivery: {delivery_id}")
@@ -2412,7 +2455,7 @@ class Catalog:
             WHERE state IN ('pending', 'retrying') AND next_attempt_at <= ?
             ORDER BY next_attempt_at LIMIT ?
         """
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(query, (now, max(1, min(int(limit), 100)))).fetchall()
         return [self._webhook_delivery_row(row, include_secret=True) for row in rows]
 
@@ -2422,7 +2465,7 @@ class Catalog:
         delivered_at: str | None,
     ) -> dict:
         now = utc_now()
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE webhook_deliveries SET state=?, attempt_count=?, http_status=?,
@@ -2438,7 +2481,7 @@ class Catalog:
         delivery = self.get_webhook_delivery(delivery_id)
         if delivery["destination_id"] is None:
             raise ValueError("Cannot retry after the webhook destination was deleted")
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE webhook_deliveries SET state='pending', attempt_count=0,
@@ -2467,12 +2510,12 @@ class Catalog:
             FROM webhook_deliveries
         """ + where + " ORDER BY created_at DESC LIMIT ?"
         values.append(limit)
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(query, values).fetchall()
         return [self._webhook_delivery_row(row) for row in rows]
 
     def webhook_delivery_counts(self) -> dict:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 "SELECT state, COUNT(*) AS count FROM webhook_deliveries GROUP BY state"
             ).fetchall()
@@ -2554,7 +2597,7 @@ class Catalog:
             clauses.append("state=?")
             values.append(state)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM jobs{where} ORDER BY created_at DESC LIMIT ?",  # noqa: S608
                 (*values, limit),
@@ -2562,7 +2605,7 @@ class Catalog:
         return [self._job_row(row) for row in rows]
 
     def get_job(self, job_id: str) -> dict:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             row = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
             if row is None:
                 raise ValueError(f"Unknown persisted RF job_id: {job_id}")
@@ -2601,7 +2644,7 @@ class Catalog:
             clauses.append("pinned=?")
             values.append(1 if pinned else 0)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM artifacts{where} ORDER BY created_at DESC LIMIT ?",  # noqa: S608
                 (*values, limit),
@@ -2609,7 +2652,7 @@ class Catalog:
         return [self._artifact_row(row) for row in rows]
 
     def get_artifact(self, artifact_id: str) -> dict:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM artifacts WHERE artifact_id=?", (artifact_id,)
             ).fetchone()
@@ -2622,7 +2665,7 @@ class Catalog:
 
     def set_pinned(self, artifact_id: str, pinned: bool) -> dict:
         self.get_artifact(artifact_id)
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             connection.execute(
                 "UPDATE artifacts SET pinned=? WHERE artifact_id=?",
                 (1 if pinned else 0, artifact_id),
@@ -2631,7 +2674,7 @@ class Catalog:
 
     def storage_status(self) -> dict:
         usage = shutil.disk_usage(self.data_dir)
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 """
                 SELECT kind, COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS size_bytes
@@ -2656,7 +2699,7 @@ class Catalog:
         }
 
     def database_health(self) -> dict:
-        with self._lock, self._connect() as connection:
+        with self._connect() as connection:
             quick_check = connection.execute("PRAGMA quick_check").fetchone()[0]
             job_count = connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
             artifact_count = connection.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
