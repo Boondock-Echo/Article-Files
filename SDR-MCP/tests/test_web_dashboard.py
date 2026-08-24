@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from importlib import resources
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
@@ -104,6 +105,25 @@ def response_body(messages):
 
 def response_headers(messages):
     return dict(messages[0]["headers"])
+
+
+def test_dashboard_assets_are_packaged_and_have_stable_landmarks():
+    assets = resources.files("rf_mcp").joinpath("assets")
+    document = assets.joinpath("dashboard.html").read_text(encoding="utf-8")
+    stylesheet = assets.joinpath("dashboard.css").read_text(encoding="utf-8")
+    script = assets.joinpath("dashboard.js").read_text(encoding="utf-8")
+
+    assert 'id="captureForm"' in document
+    assert 'id="receiverRows"' in document
+    assert 'href="/assets/rf-dashboard.css"' in document
+    assert 'src="/assets/rf-dashboard.js"' in document
+    assert ".dashboard-nav" in stylesheet
+    assert "function renderForm" in script
+    assert "function renderCard" in script
+    assert "function renderTableRow" in script
+    assert "function renderStatus" in script
+    assert "function renderEmptyState" in script
+    assert "uxStyle" not in script
 
 
 def test_dashboard_without_auth_serves_html_and_json(tmp_path, monkeypatch):
