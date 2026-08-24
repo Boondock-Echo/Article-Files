@@ -8,11 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
-from scipy.signal import find_peaks
 
 from .receiver_backend import capture_iq, offset_capture_center, validate_duration, validate_frequency
 from .catalog import catalog
@@ -491,6 +487,8 @@ class ScanManager:
         noise_floor_db = float(np.median(power_db))
         bin_width_hz = float(np.median(np.diff(frequencies)))
         distance = max(1, round(job.config["minimum_signal_spacing_hz"] / bin_width_hz))
+        from .lazy_imports import find_peaks
+
         indices, properties = find_peaks(
             power_db,
             height=noise_floor_db + job.config["threshold_above_noise_db"],
@@ -620,6 +618,9 @@ class ScanManager:
                     "point_count": int(summary_count),
                     "downsampled": bool(summary_count < frequencies.size),
                 }
+                from .plotting import pyplot
+
+                plt = pyplot()
                 fig, ax = plt.subplots(figsize=(14, 6))
                 ax.plot(frequencies / 1e6, power_db, color="#1677b8", linewidth=0.7)
                 ax.axhline(noise_floor_db, color="#555", linestyle="--", linewidth=1, label="Median noise")

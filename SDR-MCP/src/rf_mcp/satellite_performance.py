@@ -151,7 +151,9 @@ def summarize_pass_performance(reports: list[dict]) -> dict:
 def save_pass_performance_plot(reports: list[dict], *, title: str) -> str:
     if not reports:
         raise ValueError("No attempted satellite passes are available to plot")
-    import matplotlib.pyplot as plt
+    from .plotting import pyplot
+
+    plt = pyplot()
     ensure_data_dirs()
     figure, axes = plt.subplots(2, 1, figsize=(11, 8), constrained_layout=True)
     labels = sorted({item.get("downlink_label") or "Unknown" for item in reports})

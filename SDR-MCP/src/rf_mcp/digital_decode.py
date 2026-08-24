@@ -4,11 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+from .plotting import lazy_pyplot as plt
 import numpy as np
-from scipy.signal import resample_poly
+from .lazy_imports import resample_poly
 
 
 MORSE = {

@@ -10,8 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
-from PIL import Image
-from scipy.signal import resample_poly
+from .lazy_imports import resample_poly
 
 from .receiver_backend import SAMPLE_RATE, offset_capture_center, stream_iq_chunks, validate_frequency
 from .catalog import catalog
@@ -383,6 +382,8 @@ class SSTVWatcherManager:
                 f"SSTV decoder failed with exit status {completed.returncode}: "
                 f"{output or 'no diagnostic text'}"
             )
+        from PIL import Image
+
         with Image.open(png_path) as decoded:
             width, height = decoded.size
             pixels = np.asarray(decoded.convert("RGB"), dtype=np.float32)

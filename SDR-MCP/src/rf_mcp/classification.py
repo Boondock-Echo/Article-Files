@@ -3,11 +3,9 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+from .plotting import lazy_pyplot as plt
 import numpy as np
-from scipy.signal import find_peaks
+from .lazy_imports import find_peaks
 
 from .signal_analysis import _complex_lowpass
 

@@ -4,12 +4,10 @@ from dataclasses import dataclass
 from math import gcd
 from pathlib import Path
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+from .plotting import lazy_pyplot as plt
 import numpy as np
-from scipy.io import wavfile
-from scipy.signal import butter, firwin, lfilter, resample_poly, sosfilt
+from .lazy_imports import wavfile
+from .lazy_imports import butter, firwin, lfilter, resample_poly, sosfilt
 
 
 AUDIO_SAMPLE_RATE = 48_000

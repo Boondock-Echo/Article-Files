@@ -386,7 +386,9 @@ def save_doppler_plot(pass_record: dict) -> str:
     plan = pass_record.get("doppler_plan") or []
     if not plan:
         raise ValueError("Satellite pass has no persisted Doppler plan")
-    import matplotlib.pyplot as plt
+    from .plotting import pyplot
+
+    plt = pyplot()
 
     ensure_data_dirs()
     times = [datetime.fromisoformat(item["at"]) for item in plan]

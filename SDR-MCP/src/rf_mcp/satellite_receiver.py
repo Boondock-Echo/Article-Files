@@ -9,7 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
-from scipy.signal import resample_poly
+from .lazy_imports import resample_poly
 
 from .receiver_backend import offset_capture_center, stream_iq_chunks, validate_frequency
 from .catalog import catalog

@@ -9,9 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+from .plotting import lazy_pyplot as plt
 import numpy as np
 
 from .receiver_backend import capture_iq, offset_capture_center, validate_duration, validate_frequency

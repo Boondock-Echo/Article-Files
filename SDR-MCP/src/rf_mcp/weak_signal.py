@@ -10,9 +10,9 @@ from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
-import matplotlib.pyplot as plt
-from scipy.io import wavfile
-from scipy.signal import resample_poly, spectrogram
+from .plotting import lazy_pyplot as plt
+from .lazy_imports import wavfile
+from .lazy_imports import resample_poly, spectrogram
 
 from .receiver_backend import capture_iq, offset_capture_center
 from .catalog import catalog
