@@ -1499,7 +1499,7 @@ def test_catalog_records_formal_schema_version_and_migration_history():
     with tempfile.TemporaryDirectory() as temporary:
         local_catalog = Catalog(Path(temporary), index_existing=False)
         status = local_catalog.schema_status()
-        assert status["current_version"] == status["supported_version"] == 1
+        assert status["current_version"] == status["supported_version"] == 2
         assert status["up_to_date"] is True
         assert status["migrations"][0]["name"] == "baseline_v067"
 
