@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rf-mcp"
+name = "SDR-MCP"
 version = "1.0.1"
 description = "Receive-only multi-SDR spectrum analysis MCP server"
 readme = "README.md"
@@ -27,7 +27,7 @@ classifiers = [
 ]
 
 [project.scripts]
-rf-mcp = "rf_mcp.server:main"
+SDR-MCP = "rf_mcp.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

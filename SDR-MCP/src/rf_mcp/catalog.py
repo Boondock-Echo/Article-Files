@@ -25,7 +25,7 @@ class Catalog:
 
     def __init__(self, data_dir: Path = DATA_DIR, *, index_existing: bool = False) -> None:
         self.data_dir = Path(data_dir).resolve()
-        self.database_path = self.data_dir / "rf-mcp.sqlite3"
+        self.database_path = self.data_dir / "SDR-MCP.sqlite3"
         self._lock = threading.RLock()
         self._local = threading.local()
         self._connections: set[sqlite3.Connection] = set()
@@ -1212,7 +1212,7 @@ class Catalog:
                 "telemetry_rule_id,satellite_watch_id,satellite_pass_id,created_at,"
                 "acknowledged_at) VALUES (?,NULL,?,NULL,NULL,?,NULL,?,?,?, ?,?,?,?,NULL)",
                 (event_id, rule["name"], value["field_name"], message,
-                 json.dumps({"schema": "rf-mcp.satellite-telemetry-alert.v1",
+                 json.dumps({"schema": "SDR-MCP.satellite-telemetry-alert.v1",
                              "rule": rule, "value": value, "previous_value": previous}),
                  "satellite_telemetry", rule["rule_id"], value.get("watch_id"),
                  value.get("pass_id"), now),
@@ -1245,7 +1245,7 @@ class Catalog:
                 + (f" ({item['error']})" if item.get("error") else "")
             )
         details = {
-            "schema": "rf-mcp.satellite-pass.v1",
+            "schema": "SDR-MCP.satellite-pass.v1",
             "event_kind": event_kind,
             "watch": watch,
             "pass": item,
@@ -1648,7 +1648,7 @@ class Catalog:
                 """
                 UPDATE jobs
                 SET state='interrupted', completed_at=?,
-                    error=COALESCE(error, 'rf-mcp service restarted before job completion')
+                    error=COALESCE(error, 'SDR-MCP service restarted before job completion')
                 WHERE state IN ('queued', 'running', 'stopping')
                 """,
                 (now,),
@@ -2245,7 +2245,7 @@ class Catalog:
     ) -> dict:
         event_id = f"alert-{uuid4().hex}"
         details = {
-            "schema": "rf-mcp.sstv-alert.v1",
+            "schema": "SDR-MCP.sstv-alert.v1",
             "rule": rule,
             "image": image,
         }
@@ -2410,12 +2410,12 @@ class Catalog:
             created = []
             now = utc_now()
             schemas = {
-                "sstv_image": "rf-mcp.sstv-alert.v1",
-                "satellite_pass": "rf-mcp.satellite-pass.v1",
-                "satellite_telemetry": "rf-mcp.satellite-telemetry-alert.v1",
+                "sstv_image": "SDR-MCP.sstv-alert.v1",
+                "satellite_pass": "SDR-MCP.satellite-pass.v1",
+                "satellite_telemetry": "SDR-MCP.satellite-telemetry-alert.v1",
             }
             payload = {
-                "schema": schemas.get(event.get("event_type"), "rf-mcp.alert.v1"),
+                "schema": schemas.get(event.get("event_type"), "SDR-MCP.alert.v1"),
                 "server": "MiniRackDisplay",
                 "event": event,
             }

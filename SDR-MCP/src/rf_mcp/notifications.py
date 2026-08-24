@@ -88,7 +88,7 @@ def normalize_webhook_destination(
 def signed_headers(body: bytes, secret: str | None, timestamp: str, event_id: str) -> dict:
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "rf-mcp-webhook/0.50",
+        "User-Agent": "SDR-MCP-webhook/0.50",
         "X-RF-MCP-Event": event_id,
         "X-RF-MCP-Timestamp": timestamp,
     }
@@ -114,7 +114,7 @@ class WebhookDispatcher:
             return
         self._stop_event.clear()
         self._thread = threading.Thread(
-            target=self._loop, name="rf-mcp-webhooks", daemon=True
+            target=self._loop, name="SDR-MCP-webhooks", daemon=True
         )
         self._thread.start()
 

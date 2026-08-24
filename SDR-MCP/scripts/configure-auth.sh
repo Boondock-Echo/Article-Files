@@ -18,9 +18,9 @@ fi
 temporary_file="$(mktemp)"
 trap 'rm -f "$temporary_file"' EXIT
 printf 'RF_MCP_API_TOKEN=%s\n' "$token" > "$temporary_file"
-sudo install -o root -g root -m 0600 "$temporary_file" /etc/rf-mcp.env
-if systemctl cat rf-mcp.service >/dev/null 2>&1; then
-  sudo systemctl restart rf-mcp.service
+sudo install -o root -g root -m 0600 "$temporary_file" /etc/SDR-MCP.env
+if systemctl cat SDR-MCP.service >/dev/null 2>&1; then
+  sudo systemctl restart SDR-MCP.service
 fi
 
 echo "Authentication enabled. Save this token in your MCP client:"

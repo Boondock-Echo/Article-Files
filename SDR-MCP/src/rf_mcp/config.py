@@ -8,7 +8,7 @@ MIN_DURATION_SECONDS = 0.25
 MAX_DURATION_SECONDS = float(os.getenv("RF_MCP_MAX_DURATION", "10"))
 MAX_PEAKS = 50
 
-DATA_DIR = Path(os.getenv("RF_MCP_DATA_DIR", Path.home() / "rf-mcp-data"))
+DATA_DIR = Path(os.getenv("RF_MCP_DATA_DIR", Path.home() / "SDR-MCP-data"))
 CAPTURE_DIR = DATA_DIR / "captures"
 PLOT_DIR = DATA_DIR / "plots"
 RESULT_DIR = DATA_DIR / "results"

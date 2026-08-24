@@ -162,7 +162,7 @@ def fetch_celestrak_tle(norad_id: int, *, timeout_seconds: float = 10.0) -> dict
         "https://celestrak.org/NORAD/elements/gp.php?"
         f"CATNR={norad_id}&FORMAT=TLE"
     )
-    request = Request(url, headers={"User-Agent": "rf-mcp-tle/0.50"})
+    request = Request(url, headers={"User-Agent": "SDR-MCP-tle/0.50"})
     try:
         with urlopen(request, timeout=max(2.0, min(float(timeout_seconds), 30.0))) as response:  # noqa: S310
             if getattr(response, "status", 200) != 200:
@@ -471,7 +471,7 @@ class SatellitePassScheduler:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, name="rf-mcp-satellite", daemon=True)
+        self._thread = threading.Thread(target=self._loop, name="SDR-MCP-satellite", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
