@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+from bisect import bisect_left
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
@@ -33,32 +34,54 @@ RF_BANDS = {
 
 
 def _cluster_signals(runs: list[dict], tolerance_hz: float) -> list[dict]:
-    clusters: list[dict] = []
+    records = []
     for run_index, run in enumerate(runs):
-        for signal in run.get("signals") or []:
-            frequency = float(signal["frequency_hz"])
-            match = min(clusters, key=lambda item: abs(item["mean_frequency_hz"] - frequency),
-                        default=None)
-            if match is None or abs(match["mean_frequency_hz"] - frequency) > tolerance_hz:
-                match = {"frequencies": [], "powers": [], "run_indices": set(),
-                         "first_seen_at": run.get("created_at"),
-                         "last_seen_at": run.get("created_at")}
-                clusters.append(match)
-            match["frequencies"].append(frequency)
-            match["powers"].append(float(signal.get("above_noise_db", 0.0)))
-            match["run_indices"].add(run_index)
-            match["last_seen_at"] = run.get("created_at")
-            match["mean_frequency_hz"] = float(np.mean(match["frequencies"]))
+        for signal_index, signal in enumerate(run.get("signals") or []):
+            records.append((float(signal["frequency_hz"]), run_index, signal_index,
+                            run.get("created_at"),
+                            float(signal.get("above_noise_db", 0.0))))
+    # The secondary keys make the sweep (and therefore timestamp handling) stable
+    # even when callers supply runs and signals in an arbitrary order.
+    records.sort(key=lambda record: (record[0], record[1], record[2]))
+
+    clusters: list[dict] = []
+    for frequency, run_index, _signal_index, created_at, power in records:
+        match = clusters[-1] if clusters else None
+        if (match is None
+                or frequency - match["frequency_sum_hz"] / match["observation_count"]
+                > tolerance_hz):
+            match = {
+                "frequency_sum_hz": 0.0,
+                "observation_count": 0,
+                "minimum_frequency_hz": frequency,
+                "maximum_frequency_hz": frequency,
+                "maximum_above_noise_db": power,
+                "run_indices": set(),
+                "first_seen_at": created_at,
+                "last_seen_at": created_at,
+            }
+            clusters.append(match)
+        match["frequency_sum_hz"] += frequency
+        match["observation_count"] += 1
+        match["maximum_frequency_hz"] = frequency
+        match["maximum_above_noise_db"] = max(match["maximum_above_noise_db"], power)
+        match["run_indices"].add(run_index)
+        if created_at is not None:
+            if match["first_seen_at"] is None or created_at < match["first_seen_at"]:
+                match["first_seen_at"] = created_at
+            if match["last_seen_at"] is None or created_at > match["last_seen_at"]:
+                match["last_seen_at"] = created_at
     output = []
     for item in clusters:
+        mean_frequency_hz = item["frequency_sum_hz"] / item["observation_count"]
         output.append({
-            "mean_frequency_hz": round(item["mean_frequency_hz"], 1),
-            "minimum_frequency_hz": round(min(item["frequencies"]), 1),
-            "maximum_frequency_hz": round(max(item["frequencies"]), 1),
-            "observation_count": len(item["frequencies"]),
+            "mean_frequency_hz": round(mean_frequency_hz, 1),
+            "minimum_frequency_hz": round(item["minimum_frequency_hz"], 1),
+            "maximum_frequency_hz": round(item["maximum_frequency_hz"], 1),
+            "observation_count": item["observation_count"],
             "run_count": len(item["run_indices"]),
             "detection_rate": round(len(item["run_indices"]) / max(1, len(runs)), 4),
-            "maximum_above_noise_db": round(max(item["powers"]), 2),
+            "maximum_above_noise_db": round(item["maximum_above_noise_db"], 2),
             "first_seen_at": item["first_seen_at"], "last_seen_at": item["last_seen_at"],
         })
     return sorted(output, key=lambda item: (-item["run_count"], item["mean_frequency_hz"]))
@@ -95,12 +118,20 @@ def summarize_activity_runs(runs: list[dict], *, frequency_tolerance_hz: float =
                        if baseline_occupancy is not None and latest["occupied_bin_fraction"] is not None else None)
     clusters = _cluster_signals(runs, float(frequency_tolerance_hz))
     latest_frequencies = [float(item["frequency_hz"]) for item in runs[-1].get("signals") or []]
-    historical_frequencies = [float(signal["frequency_hz"]) for run in runs[:-1]
-                              for signal in run.get("signals") or []]
-    new_signals = ([frequency for frequency in latest_frequencies
-                    if not any(abs(frequency - old) <= frequency_tolerance_hz
-                               for old in historical_frequencies)]
-                   if runs[:-1] else [])
+    historical_frequencies = sorted(float(signal["frequency_hz"]) for run in runs[:-1]
+                                    for signal in run.get("signals") or [])
+    new_signals = []
+    if runs[:-1]:
+        for frequency in latest_frequencies:
+            insertion_point = bisect_left(historical_frequencies, frequency)
+            previous_is_near = (insertion_point > 0 and
+                                frequency - historical_frequencies[insertion_point - 1]
+                                <= frequency_tolerance_hz)
+            next_is_near = (insertion_point < len(historical_frequencies) and
+                            historical_frequencies[insertion_point] - frequency
+                            <= frequency_tolerance_hz)
+            if not previous_is_near and not next_is_near:
+                new_signals.append(frequency)
     anomalies = []
     if noise_delta is not None and noise_delta >= noise_anomaly_db:
         anomalies.append({"type": "raised_noise_floor", "delta_db": round(noise_delta, 2)})
