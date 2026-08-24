@@ -1,93 +1,46 @@
 # RF Lab MCP for Airspy HF+ and RTL-SDR
 
-A receive-only Model Context Protocol server for spectrum inspection with
-Airspy HF+ and RTL-SDR receivers on Debian Linux. Version 1.0.1 corrects the
-dashboard content-security policy so its authenticated high-contrast stylesheet
-loads reliably. Version 1.0.0 declared the
-stable API 1.0 core contract, semantic compatibility and deprecation policies,
-production-readiness checks, CI across Python 3.11–3.13, and security and
-contributor guidance. It preserves the established v0.69 receiver, calibration,
-job, artifact, dashboard, decoder, and satellite behavior. Version 0.69.0 added persistent
-per-receiver calibration profiles, automatic RTL-SDR PPM correction, optional
-traceable dBFS-to-dBm conversion, calibration provenance in device and spectrum
-results, and a short hardware qualification capture with length and overload
-checks. Results never claim dBm calibration unless a documented conversion
-offset is present. Version 0.68.0 introduced a
-shared application-service boundary used by both MCP and browser adapters for
-receiver onboarding, recovery reporting, spectrum capture, signal analysis, and
-broadcast-FM reception. The dashboard now delivers its stylesheet and JavaScript
-as authenticated assets instead of one inline script, allowing a stricter
-`script-src 'self'` content-security policy and independent frontend evolution.
-Version 0.67.0 made receiver
-coordination restart-safe and multi-process-safe with SQLite-backed leases,
-automatic expiration and streaming heartbeats. It records an explicit catalog
-schema version and migration history, includes stopping jobs in startup recovery,
-and adds `get_rf_recovery_status` for operational verification. Version 0.66.0 added guided
-receiver onboarding in the dashboard: scan attached hardware, review a
-registration-ready card, choose a name and role, and add the verified receiver
-without copying serial numbers or writing MCP JSON. The same workflow is
-available through `discover_attached_sdr_devices` and
-`add_discovered_sdr_device`. Version 0.65.0 added a
-functional RTL-SDR backend with index or serial selection, safe command
-construction, configurable sample rate, automatic or manual gain, PPM
-correction, CU8-to-normalized-float IQ conversion, capture and streaming
-support, and receiver-aware offset tuning beyond the Airspy frequency range.
-Version 0.64.0 introduced a receiver-backend
-contract and routes established capture and streaming workflows through the
-registered Airspy HF+ adapter. Receiver leases now cover real hardware access,
-capture metadata identifies the selected receiver and backend, and unsupported
-planned backends fail explicitly instead of silently using the Airspy. Version 0.63.0 adds persistent per-step scan
-checkpoints, shared live job cards with phase, elapsed time, and ETA, a visual
-band-scan position display, and direct plot, waterfall, image, and audio result
-previews. Version 0.62.0 added immediate dashboard action feedback with busy
-labels, spinners, and status toasts; active RF jobs refresh more frequently; and
-FM surveys render a live channel map for scanned, candidate, and decoded
-frequencies. Version 0.61.0 improved UTC weak-signal capture with
-an early-start guard and decoder preroll, and produces per-cycle FT8/FT4/WSPR
-audio diagnostics plus waveform/waterfall plots in the dashboard and artifact
-catalog. Version 0.60.1 corrected the packaged upgrade
-instructions and restores the authentication configuration script to the release
-archive. Version 0.60.0 added mode-aware amateur-band activity
-frequency presets throughout the Digital Modes dashboard, retains Custom tuning,
-and shows the renamed Fldigi decoder-audio-center control only when it applies.
-Version 0.59.0 made decoded digital results actionable:
-FT8/FT4/WSPR and Fldigi rows can repopulate the decoder or prefill a station
-memory, while guided empty states offer a known FT8 starting point instead of a
-dead-end table. Version 0.58.0 added a Quick Start home view with
-favorite station cards, recent activity shortcuts, and direct task launchers.
-Favorite memories persist through the existing `favorite` station-memory tag,
-and primary receiver forms now accept explicit Hz, kHz, or MHz input. Version 0.57.0 added a sticky, dashboard-wide receiver
-status bar backed by the persisted active-job record, elapsed/progress details,
-contextual Open and safe Stop controls, plus a recent activity drawer that links
-jobs back to their relevant workspaces. Version 0.56.0 made dashboard listening explicit:
-FM directory rows show in-place capture progress, populate a nearby persistent
-audio player with RDS details and a WAV download, attempt playback automatically,
-and report browser autoplay blocking. Station-memory Listen now opens the relevant
-receiver view before capture, and all manual audio receivers share the same
-autoplay-or-press-Play feedback. NumPy is temporarily constrained below 2.5 to
-avoid a warning-strict incompatibility in Skyfield 1.55. Version 0.55.0 added browser-managed SSTV capture and
-VIS-triggered watching, live job controls, decoder status, and an authenticated,
-filterable image gallery with duplicate handling. Version 0.54.0 added a Digital Modes dashboard for
-native CW/RTTY/BPSK31/AX.25, WSJT-X FT8/FT4/WSPR, Fldigi text modes, decoder
-capability status, and persisted spot/text browsing. Version 0.53.0 added browser-managed Broadcast FM
-surveys, resumable survey jobs, and a searchable RDS station directory with
-one-click listening and station-memory creation. Version 0.52.0 added a browser Scan & Analyze
-workspace for common-band/custom scans, heuristic surveys, live job status and
-stop controls, plus one-click execution of saved RF presets. Version 0.51.0
-reorganized the dashboard into
-task-oriented views and adds guided setup, MHz-friendly memory entry, memory
-editing/deletion, scan-profile deletion, schedule deletion, and clearer progress
-and empty states. Version 0.50.3 made RF Operations self-starting in
-the browser: create station memories and scan profiles, run the first scan, then
-optionally schedule it. Version 0.50.2 resolved the FastMCP settings model's
-generic lifespan annotation before startup, eliminating its Pydantic incomplete-field
-warning. Version 0.50.1 hardened browser JSON responses against
-non-finite RF measurements and configures a writable Matplotlib cache for the
-systemd service. Version 0.50.0 added an RF Operations dashboard with
-station status, scan trends, alert review, recent audio, and browser-managed scan
-schedules. Version 0.49.0 added schedulable station-memory scan
-profiles with restart-safe fixed intervals and change detection for reception
-state, repeated failures, SNR, RDS station identity, and RadioText.
+A receive-only [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
+server for inspecting and decoding radio signals with Airspy HF+ and RTL-SDR
+receivers on Debian Linux. It provides both MCP tools for automation and an
+authenticated browser dashboard for interactive use.
+
+> **Current release:** 1.0.1. See [CHANGELOG.md](CHANGELOG.md) for release
+> notes and version history.
+
+## What you can do
+
+- Inspect spectra, analyze signals, and demodulate AM, SSB, CW, NFM, and WFM.
+- Decode digital modes, including CW, RTTY, BPSK31, AX.25, FT8, FT4, WSPR,
+  Fldigi modes, RDS, and SSTV.
+- Survey bands, classify signals, monitor saved stations, and schedule recurring
+  jobs with alerts.
+- Plan and receive satellite passes, track Doppler shift, and decode packet
+  telemetry.
+- Review plots, audio, images, job history, and retained artifacts in the web
+  dashboard.
+- Coordinate multiple receivers safely with durable leases, recovery reporting,
+  calibration profiles, and hardware qualification checks.
+
+The server is receive-only: it does not control transmitters. Signal levels are
+reported in dBFS unless a documented dBFS-to-dBm calibration offset is present.
+
+## Documentation map
+
+- **New installation:** follow
+  [Getting started on a Raspberry Pi](#getting-started-on-a-raspberry-pi).
+- **Receiver setup:** read
+  [Receiver backend architecture](#receiver-backend-architecture).
+- **Typical tasks:** jump to [Common workflows](#common-workflows).
+- **Browser interface:** see
+  [Dashboard and operations](#dashboard-and-operations).
+- **Production deployment:** review
+  [Install as a systemd service](#install-as-a-systemd-service),
+  [Security](#security), and
+  [Restart and power-loss recovery](#restart-and-power-loss-recovery).
+- **Existing installation:** follow
+  [Upgrade an existing installation](#upgrade-an-existing-installation).
+- **API compatibility:** see [Stable API 1.0 contract](#stable-api-10-contract).
 
 ## Requirements
 
@@ -422,7 +375,7 @@ the normal user after stopping the service. A `resource busy` result usually
 means the service already owns the receiver; stop `rf-mcp` before a direct
 hardware test and start it again afterward.
 
-### Optional decoders
+## Optional decoders
 
 The basic spectrum, AM/SSB/CW/NFM, and broadcast-FM workflows do not require the
 optional decoder services. Add them only after the first capture succeeds:
@@ -437,6 +390,12 @@ sudo systemctl restart rf-mcp
 
 Each installer may add sizable packages. Run only the scripts for features you
 intend to use, then check the corresponding capability/status tool in Inspector.
+
+## Common workflows
+
+The following examples can be called from MCP Inspector or another connected
+MCP client. Start with spectrum inspection in the setup walkthrough, then use
+only the workflows and optional decoders relevant to your station.
 
 ### Analyze and demodulate a signal
 
@@ -2002,7 +1961,13 @@ confirmation-guarded `delete_signal_fingerprint`.
 
 ### Scheduled station-memory monitoring
 
-## v0.50 RF Operations dashboard
+## Dashboard and operations
+
+The web dashboard groups receiver setup, live work, saved stations, schedules,
+alerts, and artifacts into task-oriented views. The sections below describe its
+operational tools and the equivalent MCP workflows.
+
+### RF Operations dashboard
 
 Version 0.50 turns the browser dashboard into an RF operations console. The new
 Operations section summarizes the latest state and estimated SNR for every station
@@ -2021,7 +1986,7 @@ Create a station-memory scan profile with `save_station_memory_scan_profile`, op
 `http://MiniRackDisplay:8765/dashboard`, and use **Operations → Schedules** to set
 its interval. A disabled schedule can still be run manually with **Run now**.
 
-## v0.49 scheduled memory scans
+### Scheduled memory scans
 
 Version 0.49 adds `station_memory_scan` to the persistent RF preset system.
 Create a validated profile with `save_station_memory_scan_profile`, then run it
