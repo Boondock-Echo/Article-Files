@@ -6,9 +6,6 @@ from itertools import islice
 from pathlib import Path
 from typing import Iterator
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 
 
@@ -293,6 +290,9 @@ def compare_survey_results(
 
 
 def save_comparison_plot(path: Path, result: dict) -> None:
+    from .plotting import pyplot
+
+    plt = pyplot()
     matched = result["matched_signals"]
     new = result["new_signals"]
     disappeared = result["disappeared_signals"]

@@ -8,12 +8,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+from .plotting import lazy_pyplot as plt
 import numpy as np
-from scipy.io import wavfile
-from scipy.signal import resample_poly
+from .lazy_imports import wavfile
+from .lazy_imports import resample_poly
 
 from .config import AUDIO_DIR, DATA_DIR, PLOT_DIR, RESULT_DIR, ensure_data_dirs
 

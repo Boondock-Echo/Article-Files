@@ -8,9 +8,6 @@ from pathlib import Path
 from statistics import median
 from uuid import uuid4
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 
 from .config import PLOT_DIR, RESULT_DIR, ensure_data_dirs
@@ -185,6 +182,9 @@ def build_activity_dashboard(catalog, preset: dict, *, run_limit: int = 24,
 
 
 def save_activity_plot(summary: dict, runs: list[dict]) -> Path:
+    from .plotting import pyplot
+
+    plt = pyplot()
     ensure_data_dirs()
     identifier = f"activity-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
     figure, axes = plt.subplots(2, 1, figsize=(13, 8), constrained_layout=True)

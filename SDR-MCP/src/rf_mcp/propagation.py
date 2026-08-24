@@ -8,9 +8,6 @@ from statistics import median
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 
 from .activity import RF_BANDS, build_activity_dashboard
@@ -203,6 +200,9 @@ def space_weather_interpretation(snapshot: dict) -> list[dict]:
 
 
 def save_propagation_plot(report: dict) -> Path:
+    from .plotting import pyplot
+
+    plt = pyplot()
     ensure_data_dirs()
     bands = report["local_evidence"]["bands"]
     labels = [item["band_name"] for item in bands]

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
-from scipy.signal import butter, resample_poly, sosfilt
+from .lazy_imports import butter, resample_poly, sosfilt
 
 
 RDS_BIT_RATE = 1_187.5

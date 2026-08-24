@@ -12,8 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
-from PIL import Image
-from scipy.signal import hilbert, resample_poly
+from .lazy_imports import hilbert, resample_poly
 
 from .receiver_backend import capture_iq, offset_capture_center, validate_frequency
 from .catalog import catalog
@@ -80,8 +79,9 @@ def run_sstv_decoder(wav_path: Path, png_path: Path) -> subprocess.CompletedProc
     )
 
 
-def image_fingerprint(image: Image.Image) -> str:
+def image_fingerprint(image: object) -> str:
     """Return a 256-bit difference hash suitable for near-duplicate grouping."""
+    from PIL import Image
     grayscale = np.asarray(
         image.convert("L").resize((17, 16), Image.Resampling.LANCZOS),
         dtype=np.uint8,
@@ -308,6 +308,8 @@ class SSTVManager:
                     f"SSTV decoder failed with exit status {completed.returncode}: "
                     f"{decoder_output or 'no diagnostic text'}"
                 )
+            from PIL import Image
+
             with Image.open(png_path) as image:
                 width, height = image.size
                 pixels = np.asarray(image.convert("RGB"), dtype=np.float32)
