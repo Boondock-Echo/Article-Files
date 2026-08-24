@@ -742,3 +742,26 @@ def test_dashboard_broadcast_fm_validates_band_duration_and_booleans():
     assert outside[0]["status"] == 400
     assert duration[0]["status"] == 400
     assert boolean[0]["status"] == 400
+
+
+def test_dashboard_responsive_markup_primitives_and_mobile_tables():
+    assets = resources.files("rf_mcp").joinpath("assets")
+    document = assets.joinpath("dashboard.html").read_text(encoding="utf-8")
+    stylesheet = assets.joinpath("dashboard.css").read_text(encoding="utf-8")
+    script = assets.joinpath("dashboard.js").read_text(encoding="utf-8")
+
+    assert 'class="field"' in document
+    assert 'class="action-row"' in document
+    assert 'class="table-container" role="region" aria-label="Recent RF jobs table"' in document
+    assert 'class="responsive-table"' in document
+    for component in (".field{", ".field-help{", ".action-row{", ".table-container{"):
+        assert component in stylesheet
+    assert "min-height:44px" in stylesheet
+    assert "@media(max-width:850px)" in stylesheet
+    assert "@media(max-width:450px)" in stylesheet
+    assert ".responsive-table.mobile-cards td::before{content:attr(data-label)" in stylesheet
+    assert "labelTableRow(renderTableRow(cells(item)),body)" in script
+    assert "container.setAttribute('aria-label'" in script
+    for table_body in ("memoryRows", "scheduleRows", "bandJobRows", "artifactRows", "jobRows", "fmStationRows", "sstvJobRows"):
+        assert f"'{table_body}'" in script
+    assert "b.classList.add('destructive')" in script
