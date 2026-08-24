@@ -141,16 +141,116 @@ Pass `receiver_id="rtl-vhf"` to `list_devices`, `inspect_spectrum`,
 `analyze_signal`, `receive_broadcast_fm`, or `classify_signal`. Established calls
 that omit `receiver_id` continue to use `airspyhf-primary`.
 
-## Install on the Pi
+## Getting started on a Raspberry Pi
 
-Extract or copy this directory to `~/rf-mcp`, then:
+This walkthrough assumes a Raspberry Pi 5 running 64-bit Raspberry Pi OS Lite
+or Debian 13, connected to the same trusted LAN as the computer that will run
+the MCP client. Commands run on the Pi unless a step explicitly says otherwise.
+The examples use the login name `pi`; keep using your own login name if it is
+different.
+
+### 1. Prepare the Pi
+
+1. Install a 64-bit Debian 13-based image, enable SSH in Raspberry Pi Imager,
+   and boot the Pi. A Pi 5 with at least 4 GB RAM is recommended. A Pi 4 may
+   work, but is not the tested target and long FFTs or decoders will be slower.
+2. From another computer, connect over SSH (substitute the Pi's hostname or IP):
+
+   ```bash
+   ssh pi@raspberrypi.local
+   ```
+
+3. Confirm that the OS and Python meet the requirements, then update the Pi:
+
+   ```bash
+   uname -m
+   python3 --version
+   sudo apt update
+   sudo apt full-upgrade -y
+   sudo reboot
+   ```
+
+   `uname -m` should print `aarch64`, and Python must be 3.11 or newer. After
+   the reboot, reconnect with SSH. If `.local` names do not work on your
+   network, find the address with `hostname -I` on the Pi and use that address.
+
+### 2. Connect and verify the receiver
+
+Connect the SDR directly to a USB port for the first test. If it behaves
+intermittently, use a short, shielded USB cable and a powered hub; inadequate
+power and USB noise are common Raspberry Pi RF problems. Do not connect a
+transmitter directly to the SDR input. This server controls receivers only, but
+an excessive input signal can still damage receiver hardware.
+
+Install the base receiver and Python packages:
+
+```bash
+sudo apt install -y airspyhf libairspyhf1 libairspyhf-dev rtl-sdr \
+  python3-venv python3-pip python3-numpy python3-scipy \
+  python3-matplotlib python3-skyfield openssl unzip
+```
+
+Only one receiver family is required; installing both command-line packages
+makes later discovery easier. Test the attached device **as your normal user**:
+
+```bash
+# Airspy HF+
+airspyhf_info
+
+# RTL-SDR (use this instead when an RTL-SDR is attached)
+timeout 15 rtl_test -t
+```
+
+A successful command identifies the radio without `sudo`. If the device is not
+found, unplug and reconnect it, inspect `dmesg --ctime | tail -n 30`, and reboot
+once so the package's udev rules take effect. If an RTL-SDR is claimed by the
+Linux DVB driver, create a blacklist and reboot:
+
+```bash
+printf 'blacklist dvb_usb_rtl28xxu\n' | sudo tee /etc/modprobe.d/rtl-sdr-blacklist.conf
+sudo reboot
+```
+
+Do not continue until the appropriate hardware test works for the same user
+that will run `rf-mcp`.
+
+### 3. Put the release in the expected directory
+
+The service installer intentionally requires the project to be exactly
+`~/rf-mcp`. Use **one** of these methods.
+
+For the release ZIP, copy it to the Pi (for example, with `scp` from your other
+computer), then extract it:
+
+```bash
+mkdir -p ~/rf-mcp
+unzip rf-mcp-multi-sdr-v1.0.1.zip -d ~/rf-mcp
+cd ~/rf-mcp
+```
+
+When working from this repository instead, copy the contents of `SDR-MCP` so
+that `pyproject.toml` is directly inside `~/rf-mcp`—not inside a second
+`SDR-MCP` directory:
+
+```bash
+mkdir -p ~/rf-mcp
+cp -a /path/to/Article-Files/SDR-MCP/. ~/rf-mcp/
+cd ~/rf-mcp
+```
+
+Verify the layout before installing:
+
+```bash
+test -f pyproject.toml && test -f scripts/install-service.sh && echo 'Layout OK'
+```
+
+### 4. Create the Python environment and test the software
+
+Use Debian's scientific Python packages through `--system-site-packages`; this
+avoids rebuilding NumPy and SciPy on the Pi:
 
 ```bash
 cd ~/rf-mcp
-sudo apt update
-sudo apt install airspyhf libairspyhf1 libairspyhf-dev \
-  python3-venv python3-numpy python3-scipy python3-matplotlib python3-skyfield openssl
-
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -159,67 +259,122 @@ python -m pip install pytest
 pytest -q
 ```
 
-## Run interactively
+All tests should pass. The editable install is intentional: the service runs
+the code in `~/rf-mcp`, and a future release can be installed over that same
+directory. Leave the environment with `deactivate` when desired.
 
-The safe default listens on localhost only:
+### 5. Perform a local, interactive smoke test
 
-```bash
-source ~/rf-mcp/.venv/bin/activate
-rf-mcp
-```
-
-For a trusted LAN test:
-
-```bash
-RF_MCP_HOST=0.0.0.0 RF_MCP_PORT=8765 rf-mcp
-```
-
-The target appliance endpoint is `http://MiniRackDisplay:8765/mcp` (or use the
-Pi's IP address). Do not forward this port to the public Internet, even when
-authentication is enabled; HTTP bearer tokens are not encrypted in transit.
-
-### Enable bearer authentication
-
-Authentication remains disabled after an upgrade so existing clients continue
-to work. To generate a 256-bit token, save it securely, and restart the service:
+Start the server bound only to the Pi itself:
 
 ```bash
 cd ~/rf-mcp
-chmod +x scripts/configure-auth.sh
-./scripts/configure-auth.sh
+source .venv/bin/activate
+rf-mcp
 ```
 
-Configure the MCP client with the displayed HTTP header:
-
-```text
-Authorization: Bearer YOUR_TOKEN
-```
-
-The token is stored in root-only `/etc/rf-mcp.env`. Running the script again
-rotates it. You may pass a custom token as the first argument; it must be at
-least 32 characters using letters, numbers, `.`, `_`, `~`, or `-`.
-
-To disable authentication deliberately:
+Keep that terminal open. In a second SSH session, check its public health
+endpoint:
 
 ```bash
-sudo rm /etc/rf-mcp.env
-sudo systemctl restart rf-mcp
+curl --fail http://127.0.0.1:8765/healthz
 ```
 
-The public `GET /healthz` endpoint reports only service status, version, and
-whether authentication is required. It does not query the receiver or expose
-stored RF data.
+A JSON response with a healthy service confirms that Python startup works.
+Stop the foreground server with **Ctrl+C**. If startup fails, read the complete
+terminal error before proceeding; hardware is not needed merely to answer the
+health check.
 
-## MCP Inspector
+### 6. Enable authentication and install the background service
 
-From a computer with Node.js:
+The systemd unit listens on all LAN interfaces, so configure authentication
+**before** enabling it:
+
+```bash
+cd ~/rf-mcp
+chmod +x scripts/configure-auth.sh scripts/install-service.sh
+./scripts/configure-auth.sh
+./scripts/install-service.sh
+```
+
+`configure-auth.sh` prints a bearer token and stores it in the root-readable
+file `/etc/rf-mcp.env`. Copy the token once into a password manager; do not put
+it in shell history, screenshots, source control, or chat. Running the script
+again rotates the token and restarts an existing service.
+
+The installer creates `~/rf-mcp-data`, installs the unit, and starts it as the
+normal login user. Confirm startup:
+
+```bash
+systemctl --no-pager --full status rf-mcp
+curl --fail http://127.0.0.1:8765/healthz
+journalctl -u rf-mcp -n 50 --no-pager
+```
+
+The health response should say authentication is required. The systemd unit
+starts automatically after later reboots. Useful administration commands are:
+
+```bash
+sudo systemctl restart rf-mcp
+sudo systemctl stop rf-mcp
+journalctl -u rf-mcp -f
+```
+
+### 7. Find the Pi and open the dashboard
+
+Get the Pi's current addresses:
+
+```bash
+hostname
+hostname -I
+```
+
+From a browser on the same trusted LAN, open:
+
+```text
+http://PI_ADDRESS:8765/dashboard
+```
+
+Enter the bearer token at the login page. The dashboard session is separate
+from MCP client authentication. In **System → Add a receiver**, select **Scan
+for receivers**, review the detected receiver, give it a useful name and role,
+and select **Add receiver**. Airspy-only installations also retain the default
+`airspyhf-primary` receiver.
+
+Port 8765 normally needs no router change on a home LAN. If a host firewall is
+enabled on the Pi, allow it only from the local subnet (replace the example
+subnet with yours):
+
+```bash
+sudo ufw allow from 192.168.1.0/24 to any port 8765 proto tcp
+```
+
+Never add a router port-forward for 8765. The service uses plain HTTP, so its
+bearer token is not encrypted in transit. Use a VPN or a TLS reverse proxy for
+access outside the trusted LAN.
+
+### 8. Connect an MCP client and make the first capture
+
+On a desktop computer with Node.js installed, start MCP Inspector:
 
 ```bash
 npx @modelcontextprotocol/inspector
 ```
 
-Select Streamable HTTP and enter `http://PI_ADDRESS:8765/mcp`. Call
-`list_devices`, then try:
+Choose **Streamable HTTP** and use:
+
+```text
+http://PI_ADDRESS:8765/mcp
+```
+
+Add this request header, substituting the saved token:
+
+```text
+Authorization: Bearer YOUR_TOKEN
+```
+
+Connect, call `list_devices`, and confirm that the expected backend and receiver
+appear. Then call `inspect_spectrum` with a frequency supported by that radio:
 
 ```json
 {
@@ -233,9 +388,55 @@ Select Streamable HTTP and enter `http://PI_ADDRESS:8765/mcp`. Call
 }
 ```
 
-The Inspector should show a text/JSON result followed by the spectrum image.
-Set `include_plot=false` for automated calls that only need measurements and
-should avoid transferring the PNG.
+The result should contain structured measurements followed by a spectrum image.
+Set `include_plot` to `false` for automated clients that only need measurements.
+For an RTL-SDR whose tuning range does not include 10 MHz, use a local signal in
+the receiver's supported range, such as a broadcast-FM frequency, and pass its
+registered `receiver_id`.
+
+MCP client configuration formats differ, but every remote client needs the same
+three values: transport **Streamable HTTP**, URL
+`http://PI_ADDRESS:8765/mcp`, and header `Authorization: Bearer YOUR_TOKEN`.
+Use the client's remote-HTTP configuration rather than a local `command`/stdio
+configuration—the server process is running on the Pi, not on the desktop.
+
+### 9. Verify operation after a reboot
+
+Reboot once before considering setup complete:
+
+```bash
+sudo reboot
+```
+
+After reconnecting, run:
+
+```bash
+systemctl is-active rf-mcp
+curl --fail http://127.0.0.1:8765/healthz
+journalctl -u rf-mcp -b --no-pager | tail -n 50
+```
+
+Reconnect MCP Inspector and repeat `list_devices`. If captures fail while the
+service itself is healthy, rerun `airspyhf_info` or `timeout 15 rtl_test -t` as
+the normal user after stopping the service. A `resource busy` result usually
+means the service already owns the receiver; stop `rf-mcp` before a direct
+hardware test and start it again afterward.
+
+### Optional decoders
+
+The basic spectrum, AM/SSB/CW/NFM, and broadcast-FM workflows do not require the
+optional decoder services. Add them only after the first capture succeeds:
+
+```bash
+cd ~/rf-mcp
+./scripts/install-wsjt-decoders.sh   # FT8, FT4, and WSPR
+./scripts/install-fldigi-decoders.sh # Fldigi text modes
+./scripts/install-sstv-decoder.sh    # SSTV images
+sudo systemctl restart rf-mcp
+```
+
+Each installer may add sizable packages. Run only the scripts for features you
+intend to use, then check the corresponding capability/status tool in Inspector.
 
 ### Analyze and demodulate a signal
 
