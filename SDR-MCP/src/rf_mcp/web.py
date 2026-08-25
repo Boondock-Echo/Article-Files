@@ -928,7 +928,7 @@ body{{margin:0;background:#08111f;color:#e5edf8;font:16px system-ui;display:grid
             if not isinstance(values, dict):
                 raise ValueError("request body must be a JSON object")
             allowed = {"center_frequency_hz", "duration_seconds", "fft_size",
-                       "threshold_above_noise_db", "max_peaks"}
+                       "threshold_above_noise_db", "max_peaks", "receiver_id", "preferred_role"}
             unknown = sorted(set(values) - allowed)
             if unknown:
                 raise ValueError(f"unsupported fields: {', '.join(unknown)}")
@@ -948,6 +948,8 @@ body{{margin:0;background:#08111f;color:#e5edf8;font:16px system-ui;display:grid
                 duration_seconds=duration, fft_size=fft_size,
                 threshold_above_noise_db=threshold, max_peaks=max_peaks,
                 retain_iq=False, include_plot=False,
+                receiver_id=values.get("receiver_id", "auto"),
+                preferred_role=values.get("preferred_role"),
             )
             result = dict(response.structuredContent or {})
             artifacts = self.catalog.list_artifacts(job_id=result.get("job_id"), limit=10)
@@ -989,7 +991,7 @@ body{{margin:0;background:#08111f;color:#e5edf8;font:16px system-ui;display:grid
             if not isinstance(values, dict):
                 raise ValueError("request body must be a JSON object")
             allowed = {"frequency_hz", "mode", "bandwidth_hz", "duration_seconds",
-                       "fft_size", "cw_tone_hz"}
+                       "fft_size", "cw_tone_hz", "receiver_id", "preferred_role"}
             unknown = sorted(set(values) - allowed)
             if unknown:
                 raise ValueError(f"unsupported fields: {', '.join(unknown)}")
@@ -1020,6 +1022,8 @@ body{{margin:0;background:#08111f;color:#e5edf8;font:16px system-ui;display:grid
                 bandwidth_hz=bandwidth, duration_seconds=duration, fft_size=fft_size,
                 cw_tone_hz=cw_tone, retain_iq=False, include_audio=False,
                 include_plots=False,
+                receiver_id=values.get("receiver_id", "auto"),
+                preferred_role=values.get("preferred_role"),
             )
             result = dict(response.structuredContent or {})
             artifacts = self.catalog.list_artifacts(job_id=result.get("job_id"), limit=10)
@@ -1065,7 +1069,7 @@ body{{margin:0;background:#08111f;color:#e5edf8;font:16px system-ui;display:grid
             if not isinstance(values, dict):
                 raise ValueError("request body must be a JSON object")
             allowed = {"frequency_hz", "duration_seconds", "stereo", "deemphasis_us",
-                       "decode_rds_data"}
+                       "decode_rds_data", "receiver_id", "preferred_role"}
             unknown = sorted(set(values) - allowed)
             if unknown:
                 raise ValueError(f"unsupported fields: {', '.join(unknown)}")
@@ -1089,6 +1093,8 @@ body{{margin:0;background:#08111f;color:#e5edf8;font:16px system-ui;display:grid
                 duration_seconds=duration, stereo=stereo, deemphasis_us=deemphasis,
                 decode_rds_data=decode_rds, retain_iq=False, include_audio=False,
                 include_plot=False,
+                receiver_id=values.get("receiver_id", "auto"),
+                preferred_role=values.get("preferred_role", "vhf_uhf_monitor"),
             )
             result = dict(response.structuredContent or {})
             artifacts = self.catalog.list_artifacts(job_id=result.get("job_id"), limit=10)

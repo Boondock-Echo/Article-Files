@@ -127,6 +127,51 @@ def test_different_receivers_can_be_leased_concurrently():
     for lease in leases: coordinator.release_receiver(lease["lease_id"])
 
 
+def test_atomic_auto_assigns_concurrent_jobs_to_different_receivers():
+    receiver("one")
+    receiver("two")
+    barrier = threading.Barrier(3)
+    assignments = []
+
+    def admit(owner):
+        barrier.wait()
+        assignments.append(coordinator.assign_and_acquire_receiver(
+            frequency_hz=10_000_000, required_bandwidth_hz=100_000,
+            receiver_id="auto", owner=owner, implemented_backends={"airspyhf"},
+        ))
+
+    threads = [threading.Thread(target=admit, args=(owner,)) for owner in ("job-one", "job-two")]
+    for thread in threads: thread.start()
+    barrier.wait()
+    for thread in threads: thread.join()
+    assert {item["receiver_id"] for item in assignments} == {"one", "two"}
+    for item in assignments: coordinator.release_receiver(item["lease"]["lease_id"])
+
+
+def test_atomic_assignment_rejects_range_bandwidth_and_explicit_fallback():
+    receiver("narrow", tuning_ranges_hz=[[1_000_000, 2_000_000]], max_bandwidth_hz=10_000)
+    receiver("compatible", tuning_ranges_hz=[[9_000_000, 11_000_000]], max_bandwidth_hz=500_000)
+    with pytest.raises(RuntimeError, match="frequency outside tuning ranges.*required bandwidth too wide"):
+        coordinator.assign_and_acquire_receiver(
+            frequency_hz=10_000_000, required_bandwidth_hz=100_000,
+            receiver_id="narrow", owner="pinned",
+        )
+    # Pinning never silently selects the other compatible receiver.
+    assert coordinator.coordinator_status()["active_lease_count"] == 0
+
+
+def test_atomic_auto_ignores_leased_higher_ranked_receiver():
+    receiver("preferred", priority=100)
+    receiver("idle", priority=10)
+    held = coordinator.acquire_receiver("preferred", "existing")
+    assigned = coordinator.assign_and_acquire_receiver(
+        frequency_hz=10_000_000, receiver_id="auto", owner="new-job",
+    )
+    assert assigned["receiver_id"] == "idle"
+    coordinator.release_receiver(assigned["lease"]["lease_id"])
+    coordinator.release_receiver(held["lease_id"])
+
+
 def test_delete_requires_confirmation_and_rejects_active_lease():
     receiver()
     with pytest.raises(ValueError, match="confirm_delete"):
