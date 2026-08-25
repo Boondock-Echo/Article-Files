@@ -129,6 +129,46 @@ def test_dashboard_assets_are_packaged_and_have_stable_landmarks():
     assert "uxStyle" not in script
 
 
+def test_dashboard_has_one_coordinated_polling_owner():
+    script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
+        encoding="utf-8"
+    )
+
+    # One dashboard request supplies every renderer; no independent summary,
+    # memory, operation, or workspace poll is allowed.
+    assert script.count("fetch('/api/dashboard'") == 1
+    assert "renderDashboardSummary(snapshot)" in script
+    assert "renderMemories(snapshot)" in script
+    assert "renderDashboardWorkspace(snapshot)" in script
+    assert "refreshMemories" not in script
+    assert "refreshOperations" not in script
+    assert "setInterval(refresh" not in script
+    assert "dashboardRefreshTimer=setTimeout(refreshDashboard,delay)" in script
+
+
+def test_dashboard_coordinator_guards_in_flight_and_stale_requests():
+    script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "if(dashboardRefreshInFlight)return dashboardRefreshInFlight" in script
+    assert "const requestId=++dashboardRequestId" in script
+    assert "if(requestId<lastRenderedDashboardRequestId)return" in script
+    assert "lastRenderedDashboardRequestId=requestId" in script
+    assert "finally{dashboardRefreshInFlight=null}" in script
+
+
+def test_dashboard_coordinator_uses_active_and_idle_intervals():
+    script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "DASHBOARD_IDLE_INTERVAL_MS=15000" in script
+    assert "DASHBOARD_ACTIVE_INTERVAL_MS=3000" in script
+    assert "dashboardHasActiveJob(snapshot)?DASHBOARD_ACTIVE_INTERVAL_MS:DASHBOARD_IDLE_INTERVAL_MS" in script
+    assert "['queued','running','stopping'].includes(job.state)" in script
+
+
 def test_dashboard_navigation_is_grouped_and_accessible():
     assets = resources.files("rf_mcp").joinpath("assets")
     script = assets.joinpath("dashboard.js").read_text(encoding="utf-8")
