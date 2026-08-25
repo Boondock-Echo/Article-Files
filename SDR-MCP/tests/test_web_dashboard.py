@@ -827,6 +827,18 @@ def test_dashboard_frequency_controls_share_memory_recall_and_integer_hz_payload
     assert "outside the selected receiver’s supported range" in script
 
 
+def test_dashboard_frequency_enhancement_allows_initially_empty_forms():
+    script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
+        encoding="utf-8"
+    )
+
+    # The create-memory frequency is intentionally empty until the user enters
+    # one. Enhancing that input must not abort the rest of dashboard startup.
+    assert "initialValue=input.value.trim()" in script
+    assert "initialHz=initialValue===''?null:parseFrequencyInput" in script
+    assert "if(initialHz!==null)input.value=formatFrequency" in script
+
+
 def test_dashboard_uses_accessible_confirmation_dialog_for_consequential_actions():
     app = RfWebApp(downstream, FakeCatalog(), None, "0.50.0")
     script = response_body(asyncio.run(request(app, "/assets/rf-dashboard.js")))
