@@ -117,9 +117,19 @@ class _Session:
     rows_produced: int = 0
     termination_reason: str | None = None
     error: str | None = None
+    first_iq_monotonic: float | None = None
+    first_row_monotonic: float | None = None
+    latest_row_monotonic: float | None = None
+    stop_requested_monotonic: float | None = None
+    stopped_monotonic: float | None = None
+    rows_dropped: int = 0
 
     def public(self):
         value = asdict(self); value["state"] = self.state.value; value["config"] = asdict(self.config)
+        elapsed = self.latest_row_monotonic - self.first_row_monotonic if self.first_row_monotonic and self.latest_row_monotonic else None
+        value["effective_row_rate_hz"] = (round(max(0, self.rows_produced-1)/elapsed, 3) if elapsed and elapsed > 0 else None)
+        value["stop_latency_ms"] = (round((self.stopped_monotonic-self.stop_requested_monotonic)*1000, 3)
+                                    if self.stopped_monotonic is not None and self.stop_requested_monotonic is not None else None)
         return value
 
 
@@ -176,10 +186,15 @@ class LiveWaterfallManager:
             if frame is not None: self._rows[session.session_id].append(frame)
             for listener in self._listeners.get(session.session_id, []):
                 if listener.full():
-                    try: listener.get_nowait()
+                    try:
+                        listener.get_nowait()
+                        if frame is not None:
+                            session.rows_dropped = getattr(session, "rows_dropped", 0) + 1
                     except queue.Empty: pass
                 try: listener.put_nowait(frame)
-                except queue.Full: pass
+                except queue.Full:
+                    if frame is not None:
+                        session.rows_dropped = getattr(session, "rows_dropped", 0) + 1
 
     def _produce(self, session, stop, iq_subscription):
         try:
@@ -193,6 +208,7 @@ class LiveWaterfallManager:
                 if chunk is None:
                     if iq_subscription.error: raise RuntimeError(iq_subscription.error)
                     break
+                if session.first_iq_monotonic is None: session.first_iq_monotonic = time.monotonic()
                 pending = np.concatenate((pending, complex_iq(chunk)))
                 while pending.size >= cfg.fft_size:
                     block, pending = pending[:cfg.fft_size], pending[cfg.fft_size:]
@@ -203,6 +219,8 @@ class LiveWaterfallManager:
                              "timestamp": _now(), "frequency_start_hz": low, "frequency_end_hz": high,
                              "bin_count": int(row.size), "bits": cfg.quantization_bits,
                              "encoding": "base64", "row": base64.b64encode(row.tobytes()).decode("ascii")}
+                    if session.first_row_monotonic is None: session.first_row_monotonic = now
+                    session.latest_row_monotonic = now
                     session.rows_produced += 1; self._broadcast(session, frame)
                     next_row = now + 1 / cfg.update_rate_hz
             session.termination_reason = "stopped" if stop.is_set() else "duration_limit"
@@ -213,6 +231,7 @@ class LiveWaterfallManager:
         finally:
             stop.set()
             iq_subscription.close()
+            session.stopped_monotonic = time.monotonic()
             session.ended_at = _now(); self._broadcast(session, None)
             with self._lock: self._history.append(session.public())
 
@@ -224,6 +243,7 @@ class LiveWaterfallManager:
             if session: session.client_count = len(listeners)
             if session and not listeners and session.state in (LiveWaterfallState.STARTING, LiveWaterfallState.STREAMING):
                 session.state = LiveWaterfallState.STOPPING; session.termination_reason = "stopped"
+                session.stop_requested_monotonic = time.monotonic()
                 self._stops[session_id].set()
 
     def status(self):
@@ -235,6 +255,7 @@ class LiveWaterfallManager:
             for sid in targets:
                 if sid in self._stops:
                     found = True; self._stops[sid].set(); session = self._sessions[sid]
+                    if session.stop_requested_monotonic is None: session.stop_requested_monotonic = time.monotonic()
                     if session.state in (LiveWaterfallState.STARTING, LiveWaterfallState.STREAMING): session.state = LiveWaterfallState.STOPPING
             return {"stopped": found, "session_id": session_id}
 
