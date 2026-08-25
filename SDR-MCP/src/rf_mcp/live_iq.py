@@ -108,6 +108,7 @@ class LiveIQManager:
                 session.frequency_hz,
                 duration_seconds=max(config.LIVE_AUDIO_MAX_DURATION_SECONDS,
                                      config.LIVE_WATERFALL_MAX_DURATION_SECONDS),
+                chunk_seconds=config.LIVE_IQ_CHUNK_SECONDS,
                 stop_event=session.stop, receiver_id=session.receiver_id,
                 lease_owner=f"live-iq-{session.session_id}", purpose="shared live IQ")
             session.receiver_stream_created_monotonic = time.monotonic()

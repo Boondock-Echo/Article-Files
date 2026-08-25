@@ -3,6 +3,25 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+
+class ConfigurationError(ValueError):
+    """An invalid operator-supplied configuration value."""
+
+
+def _bounded_float_env(primary: str, legacy: str, default: str, minimum: float,
+                       maximum: float) -> float:
+    source = primary if primary in os.environ else legacy
+    raw = os.getenv(source, default)
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{source} must be a number (got {raw!r})") from exc
+    if not minimum <= value <= maximum:
+        raise ConfigurationError(
+            f"{source} must be between {minimum:g} and {maximum:g} seconds (got {raw!r})"
+        )
+    return value
+
 SAMPLE_RATE = 768_000
 MIN_DURATION_SECONDS = 0.25
 MAX_DURATION_SECONDS = float(os.getenv("RF_MCP_MAX_DURATION", "10"))
@@ -13,7 +32,9 @@ MAX_PEAKS = 50
 # operator without changing the recording contract.
 LIVE_AUDIO_MAX_DURATION_SECONDS = float(os.getenv("RF_MCP_LIVE_MAX_DURATION", "900"))
 LIVE_AUDIO_MAX_CLIENTS = int(os.getenv("RF_MCP_LIVE_MAX_CLIENTS", "4"))
-LIVE_AUDIO_INPUT_CHUNK_SECONDS = float(os.getenv("RF_MCP_LIVE_CHUNK_SECONDS", "0.10"))
+LIVE_IQ_CHUNK_SECONDS = _bounded_float_env(
+    "RF_MCP_LIVE_IQ_CHUNK_SECONDS", "RF_MCP_LIVE_CHUNK_SECONDS", "0.10", 0.1, 2.0,
+)
 LIVE_AUDIO_IDLE_TIMEOUT_SECONDS = float(os.getenv("RF_MCP_LIVE_IDLE_TIMEOUT", "15"))
 LIVE_AUDIO_OUTPUT_QUEUE_CHUNKS = int(os.getenv("RF_MCP_LIVE_QUEUE_CHUNKS", "16"))
 LIVE_AUDIO_HISTORY_SIZE = int(os.getenv("RF_MCP_LIVE_HISTORY_SIZE", "32"))

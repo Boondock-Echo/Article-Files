@@ -22,6 +22,7 @@ from .config import (
     TUNING_RANGES_HZ,
     ensure_data_dirs,
 )
+from .subprocess_stream import read_chunks
 
 _DEVICE_LOCK = threading.Lock()
 
@@ -258,18 +259,11 @@ def stream_iq_chunks(
             stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
             stderr_thread.start()
             assert process.stdout is not None
-            pending = bytearray()
-            while not stop_event.is_set() and time.monotonic() - started < duration_seconds:
-                block = process.stdout.read(chunk_bytes - len(pending))
-                if not block:
-                    break
-                pending.extend(block)
-                if len(pending) < chunk_bytes:
-                    continue
-                yield np.frombuffer(bytes(pending), dtype="<f4")
-                pending.clear()
-            if pending and len(pending) % 8 == 0:
-                yield np.frombuffer(bytes(pending), dtype="<f4")
+            for block in read_chunks(
+                process.stdout, chunk_bytes, stop_event, started + duration_seconds,
+            ):
+                if len(block) % 8 == 0:
+                    yield np.frombuffer(block, dtype="<f4")
         except FileNotFoundError as exc:
             raise AirspyError(f"Required executable not found: {command[0]}") from exc
         finally:
