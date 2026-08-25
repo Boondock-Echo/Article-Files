@@ -23,6 +23,7 @@ import numpy as np
 from scipy.signal import butter, sosfilt
 
 from . import config, receiver_backend
+from .live_iq import LiveIQManager
 from .signal_analysis import normalize_mode, validate_bandwidth
 
 LIVE_MODES = ("broadcast_fm", "am", "nfm", "usb", "lsb", "cw")
@@ -230,8 +231,9 @@ class LiveSubscription:
 
 
 class LiveAudioManager:
-    def __init__(self, encoder_factory=OpusEncoder):
+    def __init__(self, encoder_factory=OpusEncoder, iq_manager: LiveIQManager | None = None):
         self.encoder_factory, self._lock = encoder_factory, threading.RLock()
+        self.iq_manager = iq_manager or LiveIQManager()
         self._sessions, self._listeners = {}, {}
         self._stops, self._history = {}, deque(maxlen=config.LIVE_AUDIO_HISTORY_SIZE)
 
@@ -247,14 +249,16 @@ class LiveAudioManager:
         cfg = requested.validated(); receiver, _ = receiver_backend.resolve_receiver(cfg.receiver_id)
         rid = receiver["receiver_id"]
         with self._lock:
-            active = next((s for s in self._sessions.values() if s.receiver_id == rid and s.state in (LiveAudioState.STARTING, LiveAudioState.STREAMING)), None)
-            if active and active.config != cfg: raise RuntimeError("receiver busy with an incompatible live session")
+            active = next((s for s in self._sessions.values() if s.receiver_id == rid and
+                           s.config == cfg and s.state in
+                           (LiveAudioState.STARTING, LiveAudioState.STREAMING)), None)
             session = active
             if session is None:
+                iq_subscription = self.iq_manager.subscribe(cfg.frequency_hz, rid)
                 session = _Session(uuid4().hex, cfg, rid, LiveAudioState.STARTING, _now())
                 self._sessions[session.session_id] = session; self._listeners[session.session_id] = []
                 stop = threading.Event(); self._stops[session.session_id] = stop
-                threading.Thread(target=self._produce, args=(session, stop), daemon=True,
+                threading.Thread(target=self._produce, args=(session, stop, iq_subscription), daemon=True,
                                  name=f"live-audio-{rid}").start()
             if session.client_count >= config.LIVE_AUDIO_MAX_CLIENTS: raise RuntimeError("live audio client limit reached")
             frames = queue.Queue(maxsize=config.LIVE_AUDIO_OUTPUT_QUEUE_CHUNKS)
@@ -270,18 +274,20 @@ class LiveAudioManager:
                 try: listener.put_nowait(chunk)
                 except queue.Full: pass
 
-    def _produce(self, session, stop):
-        encoder = generator = None
+    def _produce(self, session, stop, iq_subscription):
+        encoder = None
         try:
             encoder = self.encoder_factory(); sample_rate = receiver_backend.SAMPLE_RATE
             dsp = StreamingDemodulator(session.config, sample_rate)
             threading.Thread(target=lambda: [self._broadcast(session, c) for c in encoder.chunks()], daemon=True).start()
             session.state, session.started_at = LiveAudioState.STREAMING, _now()
-            generator = receiver_backend.stream_iq_chunks(session.config.frequency_hz,
-                duration_seconds=session.config.maximum_duration_seconds, stop_event=stop,
-                receiver_id=session.receiver_id, lease_owner=f"live-{session.session_id}", purpose="live audio")
-            for iq in generator:
-                if stop.is_set(): break
+            deadline = time.monotonic() + session.config.maximum_duration_seconds
+            while not stop.is_set() and time.monotonic() < deadline:
+                try: iq = iq_subscription.chunks.get(timeout=min(.1, max(0, deadline-time.monotonic())))
+                except queue.Empty: continue
+                if iq is None:
+                    if iq_subscription.error: raise RuntimeError(iq_subscription.error)
+                    break
                 for pcm in dsp.process(iq): encoder.write(pcm)
             session.termination_reason = "stopped" if stop.is_set() else "duration_limit"
             session.state = LiveAudioState.COMPLETED
@@ -290,9 +296,7 @@ class LiveAudioManager:
             session.error = f"{type(exc).__name__}: {str(exc)[:240]}"
         finally:
             stop.set()
-            if generator is not None:
-                try: generator.close()
-                except Exception: pass
+            if iq_subscription is not None: iq_subscription.close()
             if encoder is not None: encoder.close()
             session.ended_at = _now(); self._broadcast(session, None)
             with self._lock: self._history.append(session.public())
@@ -304,7 +308,7 @@ class LiveAudioManager:
             session = self._sessions.get(session_id)
             if session: session.client_count = len(listeners)
             if session and not listeners and session.state in (LiveAudioState.STARTING, LiveAudioState.STREAMING):
-                session.state = LiveAudioState.STOPPING; session.termination_reason = "last_listener_disconnected"
+                session.state = LiveAudioState.STOPPING; session.termination_reason = "stopped"
                 self._stops[session_id].set()
 
     def status(self):
@@ -321,7 +325,9 @@ class LiveAudioManager:
                     if s.state in (LiveAudioState.STARTING, LiveAudioState.STREAMING): s.state = LiveAudioState.STOPPING
             return {"stopped": found, "session_id": session_id}
 
-    def shutdown(self): self.stop()
+    def shutdown(self):
+        self.stop()
+        self.iq_manager.shutdown()
 
 
 def _now(): return datetime.now(timezone.utc).isoformat()

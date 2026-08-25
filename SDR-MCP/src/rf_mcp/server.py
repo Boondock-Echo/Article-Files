@@ -52,6 +52,7 @@ from .fldigi_bridge import (
     normalize_fldigi_mode,
 )
 from .monitoring import monitor_manager
+from .live_iq import LiveIQManager
 from .notifications import WebhookDispatcher, normalize_webhook_destination
 from .operations import acquire_long_job, active_long_job, release_long_job
 from .presets import PRESET_TYPES, normalize_preset
@@ -210,6 +211,7 @@ _SERVER_STARTED_MONOTONIC = time.monotonic()
 _MAX_INLINE_ARTIFACT_BYTES = int(os.getenv("RF_MCP_MAX_INLINE_ARTIFACT_BYTES", "10485760"))
 _INTERRUPTED_JOBS_ON_STARTUP = catalog.mark_interrupted_jobs()
 receiver_service = ReceiverService()
+live_iq_manager = LiveIQManager()
 
 
 class _LazyLiveAudioManager:
@@ -218,7 +220,7 @@ class _LazyLiveAudioManager:
     def _get(self):
         if self._manager is None:
             from .live_audio import LiveAudioManager
-            self._manager = LiveAudioManager()
+            self._manager = LiveAudioManager(iq_manager=live_iq_manager)
         return self._manager
     def capabilities(self): return self._get().capabilities()
     def status(self): return self._get().status()
@@ -235,7 +237,7 @@ class _LazyLiveWaterfallManager:
     def _get(self):
         if self._manager is None:
             from .live_waterfall import LiveWaterfallManager
-            self._manager = LiveWaterfallManager()
+            self._manager = LiveWaterfallManager(iq_manager=live_iq_manager)
         return self._manager
     def status(self): return self._get().status()
     def stop(self, session_id=None): return self._get().stop(session_id)

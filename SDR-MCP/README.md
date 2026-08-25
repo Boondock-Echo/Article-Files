@@ -2477,11 +2477,15 @@ curl -N -H "Authorization: Bearer $RF_MCP_API_TOKEN" \
 ```
 
 FFmpeg with `libopus` is required only for live audio; readiness reports its
-absence without disabling recording. One producer owns the receiver lease and
-identically tuned authorized listeners may share it. An incompatible retune is
-rejected. The final listener disconnect, explicit stop, configured duration
-limit, application shutdown, or error releases the lease promptly. Slow clients
-are kept at the live edge by dropping their oldest buffered encoded chunk.
+absence without disabling recording. One shared in-memory IQ producer owns the
+receiver lease. Live audio and `/api/live-waterfall` consumers tuned to the same
+receiver, center frequency, sample rate, and other hardware settings may attach
+to it even when their demodulator or FFT display settings differ. An incompatible
+retune is rejected with HTTP 409 (`receiver_busy`). The final IQ consumer
+disconnect, explicit stop, configured duration limit, application shutdown, or
+error releases the lease promptly. Every IQ, audio, and waterfall consumer has
+a bounded queue; slow clients stay at the live edge by losing their oldest chunk
+instead of blocking receiver acquisition.
 Defaults are bounded by `RF_MCP_LIVE_MAX_DURATION`, `RF_MCP_LIVE_MAX_CLIENTS`,
 `RF_MCP_LIVE_CHUNK_SECONDS`, `RF_MCP_LIVE_IDLE_TIMEOUT`, and
 `RF_MCP_LIVE_QUEUE_CHUNKS`.
