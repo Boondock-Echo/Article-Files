@@ -41,6 +41,32 @@ def test_config_bounds_and_frequency_validation(monkeypatch):
     with pytest.raises(ValueError): settings(maximum_duration_seconds=config.LIVE_WATERFALL_MAX_DURATION_SECONDS + 1).validated()
 
 
+def test_auto_receiver_policy_is_resolved_before_iq_subscription(monkeypatch):
+    monkeypatch.setattr('rf_mcp.receiver_backend.validate_frequency', lambda *_: pytest.fail('auto is not a receiver ID'))
+    monkeypatch.setattr('rf_mcp.live_waterfall.plan_assignment', lambda **_values: {
+        'selected': {'receiver_id': 'idle-waterfall'},
+    })
+    monkeypatch.setattr('rf_mcp.receiver_backend.resolve_receiver',
+                        lambda receiver_id: ({'receiver_id': receiver_id}, None))
+
+    subscribed = {}
+    class IQSubscription:
+        chunks = queue.Queue()
+        error = None
+        def close(self): pass
+    class IQManager:
+        def subscribe(self, frequency_hz, receiver_id):
+            subscribed.update(frequency_hz=frequency_hz, receiver_id=receiver_id)
+            result = IQSubscription(); result.chunks.put(None); return result
+        def shutdown(self): pass
+
+    manager = LiveWaterfallManager(iq_manager=IQManager())
+    subscription = manager.subscribe(settings(receiver_id='auto'))
+    assert subscribed == {'frequency_hz': 10_000_000, 'receiver_id': 'idle-waterfall'}
+    assert manager.status()['sessions'][0]['receiver_id'] == 'idle-waterfall'
+    assert subscription.rows.get(timeout=2) is None
+
+
 def test_history_and_listener_queues_are_bounded(monkeypatch):
     manager = LiveWaterfallManager()
     monkeypatch.setattr(config, 'LIVE_WATERFALL_HISTORY_ROWS', 3)
