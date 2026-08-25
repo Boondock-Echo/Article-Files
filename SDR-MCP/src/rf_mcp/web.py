@@ -9,6 +9,7 @@ import math
 import re
 import secrets
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Awaitable, Callable
 from urllib.parse import parse_qs, quote
@@ -242,6 +243,14 @@ class RfWebApp:
                                 extra_headers=[(b"www-authenticate", b"Bearer")])
             else:
                 await self._dashboard_data(send)
+            return
+
+        if path in {"/api/dashboard/jobs", "/api/dashboard/artifacts"}:
+            if not self._dashboard_authorized(scope):
+                await _response(send, 401, _json_bytes({"error": "unauthorized"}),
+                                extra_headers=[(b"www-authenticate", b"Bearer")])
+            else:
+                await self._dashboard_history(scope, send, path.rsplit("/", 1)[-1])
             return
 
         operations = {
@@ -522,6 +531,47 @@ body{{margin:0;background:#08111f;color:#e5edf8;font:16px system-ui;display:grid
             await _response(send, 500, _json_bytes({"error": "dashboard_unavailable",
                                                     "detail": f"{type(exc).__name__}: {exc}"}),
                             extra_headers=self._security_headers())
+
+    async def _dashboard_history(self, scope: dict, send: Callable, resource: str) -> None:
+        """Return one validated, bounded page of jobs or artifacts."""
+        try:
+            raw = parse_qs(scope.get("query_string", b"").decode(), keep_blank_values=True)
+            def one(name: str, default: str = "") -> str:
+                return raw.get(name, [default])[-1].strip()
+            limit_text, cursor_text = one("limit", "20"), one("cursor", "0")
+            if not limit_text.isdigit() or not 1 <= int(limit_text) <= 100:
+                raise ValueError("limit must be an integer from 1 to 100")
+            if not cursor_text.isdigit():
+                raise ValueError("cursor must be a non-negative integer")
+            limit, offset = int(limit_text), int(cursor_text)
+            if resource == "jobs":
+                job_type, state = one("job_type"), one("state")
+                if not all(re.fullmatch(r"[A-Za-z0-9_-]{0,64}", value)
+                           for value in (job_type, state)):
+                    raise ValueError("job_type and state contain invalid characters")
+                time_range = one("time_range", "all")
+                hours = {"all": None, "1h": 1, "24h": 24, "7d": 168, "30d": 720}
+                if time_range not in hours:
+                    raise ValueError("time_range must be all, 1h, 24h, 7d, or 30d")
+                after = ((datetime.now(timezone.utc) - timedelta(hours=hours[time_range])).isoformat()
+                         if hours[time_range] else None)
+                items = self.catalog.list_jobs(job_type=job_type or None, state=state or None,
+                    created_after=after, search=one("q") or None, offset=offset, limit=limit + 1)
+            else:
+                kind = one("kind")
+                if not re.fullmatch(r"[A-Za-z0-9_-]{0,64}", kind):
+                    raise ValueError("kind contains invalid characters")
+                items = self.catalog.list_artifacts(kind=kind or None,
+                    filename=one("filename") or None, offset=offset, limit=limit + 1)
+                items = [{**item, "download_path": f"/artifacts/{item['artifact_id']}"}
+                         for item in items]
+            page = items[:limit]
+            await _response(send, 200, _json_bytes({"items": page, "count": len(page),
+                "has_more": len(items) > limit,
+                "next_cursor": str(offset + limit) if len(items) > limit else None}))
+        except (ValueError, UnicodeDecodeError) as exc:
+            await _response(send, 400, _json_bytes({"error": "invalid_parameters",
+                                                    "detail": str(exc)}))
 
     async def _json_request(self, receive: Callable) -> dict:
         body = bytearray()

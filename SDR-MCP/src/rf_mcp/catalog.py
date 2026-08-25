@@ -2588,6 +2588,9 @@ class Catalog:
         *,
         job_type: str | None = None,
         state: str | None = None,
+        created_after: str | None = None,
+        search: str | None = None,
+        offset: int = 0,
         limit: int = 50,
     ) -> list[dict]:
         limit = max(1, min(int(limit), 200))
@@ -2599,11 +2602,19 @@ class Catalog:
         if state:
             clauses.append("state=?")
             values.append(state)
+        if created_after:
+            clauses.append("created_at>=?")
+            values.append(created_after)
+        if search:
+            clauses.append("(job_id LIKE ? OR job_type LIKE ? OR state LIKE ?)")
+            pattern = f"%{search}%"
+            values.extend((pattern, pattern, pattern))
+        offset = max(0, int(offset))
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self._connect() as connection:
             rows = connection.execute(
-                f"SELECT * FROM jobs{where} ORDER BY created_at DESC LIMIT ?",  # noqa: S608
-                (*values, limit),
+                f"SELECT * FROM jobs{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",  # noqa: S608
+                (*values, limit, offset),
             ).fetchall()
         return [self._job_row(row) for row in rows]
 
@@ -2632,6 +2643,8 @@ class Catalog:
         kind: str | None = None,
         job_id: str | None = None,
         pinned: bool | None = None,
+        filename: str | None = None,
+        offset: int = 0,
         limit: int = 50,
     ) -> list[dict]:
         limit = max(1, min(int(limit), 200))
@@ -2646,11 +2659,15 @@ class Catalog:
         if pinned is not None:
             clauses.append("pinned=?")
             values.append(1 if pinned else 0)
+        if filename:
+            clauses.append("filename LIKE ?")
+            values.append(f"%{filename}%")
+        offset = max(0, int(offset))
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self._connect() as connection:
             rows = connection.execute(
-                f"SELECT * FROM artifacts{where} ORDER BY created_at DESC LIMIT ?",  # noqa: S608
-                (*values, limit),
+                f"SELECT * FROM artifacts{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",  # noqa: S608
+                (*values, limit, offset),
             ).fetchall()
         return [self._artifact_row(row) for row in rows]
 

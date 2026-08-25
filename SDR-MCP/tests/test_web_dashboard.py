@@ -1160,3 +1160,56 @@ def test_dashboard_image_viewer_is_accessible_and_used_for_every_image_path():
     assert "@media(prefers-reduced-motion:reduce)" in stylesheet
     assert "target='_blank'" not in script
     assert 'target="_blank"' not in script
+
+
+def test_dashboard_history_endpoints_validate_and_page(monkeypatch):
+    catalog = FakeCatalog()
+    calls = []
+    catalog.list_jobs = lambda **kwargs: calls.append(("jobs", kwargs)) or [
+        {"job_id": f"job-{n}", "job_type": "spectrum", "state": "completed",
+         "created_at": "2026-08-11T12:00:00+00:00"} for n in range(3)]
+    catalog.list_artifacts = lambda **kwargs: calls.append(("artifacts", kwargs)) or [
+        {"artifact_id": f"art-{n:x}", "filename": f"plot-{n}.png", "kind": "plot",
+         "size_bytes": n, "path": f"/tmp/{n}"} for n in range(3)]
+    app = RfWebApp(downstream, catalog, None, "0.60.0")
+
+    async def history_request(path, query):
+        messages = []
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+        async def send(message):
+            messages.append(message)
+        await app({"type": "http", "path": path, "query_string": query.encode(),
+                   "method": "GET", "headers": []}, receive, send)
+        return messages
+
+    jobs = asyncio.run(history_request("/api/dashboard/jobs",
+        "limit=2&cursor=4&job_type=spectrum&state=completed&time_range=24h&q=job"))
+    payload = json.loads(response_body(jobs))
+    assert jobs[0]["status"] == 200
+    assert payload["count"] == 2 and payload["has_more"] is True
+    assert payload["next_cursor"] == "6"
+    assert calls[0][1]["offset"] == 4 and calls[0][1]["limit"] == 3
+    assert calls[0][1]["created_after"] is not None
+
+    artifacts = asyncio.run(history_request("/api/dashboard/artifacts",
+        "limit=2&kind=plot&filename=plot"))
+    assert json.loads(response_body(artifacts))["items"][0]["download_path"] == "/artifacts/art-0"
+    invalid = asyncio.run(history_request("/api/dashboard/jobs", "limit=0"))
+    assert invalid[0]["status"] == 400
+    assert json.loads(response_body(invalid))["error"] == "invalid_parameters"
+
+
+def test_dashboard_history_filter_contract():
+    assets = resources.files("rf_mcp").joinpath("assets")
+    document = assets.joinpath("dashboard.html").read_text(encoding="utf-8")
+    script = assets.joinpath("dashboard.js").read_text(encoding="utf-8")
+    for landmark in ("jobTypeFilter", "jobStateFilter", "jobTimeFilter", "jobTextFilter",
+                     "artifactKindFilter", "artifactFilenameFilter", "jobResultCount",
+                     "artifactResultCount", "jobLoadMore", "artifactLoadMore"):
+        assert f'id="{landmark}"' in document
+    assert "Clear filters" in document
+    assert "/api/dashboard/${kind}?${params}" in script
+    assert "No RF jobs match these filters" in script
+    assert "No artifacts match these filters" in script
+    assert "next_cursor" in script and "Showing ${state.items.length}" in script
