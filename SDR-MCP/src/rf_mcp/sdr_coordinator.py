@@ -315,17 +315,22 @@ def register_discovered_device(
 
 
 def plan_assignment(*, frequency_hz: int, required_bandwidth_hz: int = 0,
-                    preferred_role: str | None = None, require_verified: bool = True) -> dict:
+                    preferred_role: str | None = None, require_verified: bool = True,
+                    receiver_id: str | None = "auto",
+                    implemented_backends: set[str] | None = None) -> dict:
     frequency_hz, required_bandwidth_hz = int(frequency_hz), int(required_bandwidth_hz)
     if frequency_hz < 0 or required_bandwidth_hz < 0:
         raise ValueError("frequency and bandwidth must not be negative")
     if preferred_role is not None and preferred_role not in ROLES:
         raise ValueError(f"preferred_role must be one of {sorted(ROLES)}")
+    requested_id = "auto" if receiver_id in (None, "", "auto") else _identifier(receiver_id)
     candidates, rejected = [], []
     for item in list_receivers():
         reasons = []
+        if requested_id != "auto" and item["receiver_id"] != requested_id: reasons.append("not requested receiver")
         if not item["enabled"]: reasons.append("disabled")
         if require_verified and not item["verified"]: reasons.append("not verified")
+        if implemented_backends is not None and item["backend"] not in implemented_backends: reasons.append("capture backend not implemented")
         if not any(low <= frequency_hz <= high for low, high in item["tuning_ranges_hz"]): reasons.append("frequency outside tuning ranges")
         if required_bandwidth_hz > item["max_bandwidth_hz"]: reasons.append("required bandwidth too wide")
         if item["lease"] is not None: reasons.append("currently leased")
@@ -340,8 +345,73 @@ def plan_assignment(*, frequency_hz: int, required_bandwidth_hz: int = 0,
     candidates.sort(key=lambda x: (-x["score"], x["receiver_id"]))
     return {"frequency_hz": frequency_hz, "required_bandwidth_hz": required_bandwidth_hz,
             "preferred_role": preferred_role, "require_verified": require_verified,
+            "receiver_id": requested_id,
             "selected": candidates[0] if candidates else None, "candidates": candidates,
             "rejected": rejected, "dry_run": True}
+
+
+def assign_and_acquire_receiver(*, frequency_hz: int, owner: str,
+                                required_bandwidth_hz: int = 0,
+                                receiver_id: str | None = "auto",
+                                preferred_role: str | None = None,
+                                purpose: str = "", require_verified: bool = True,
+                                implemented_backends: set[str] | None = None) -> dict:
+    """Select a compatible receiver and create its lease in one transaction.
+
+    ``BEGIN IMMEDIATE`` serializes admission across processes.  Candidate discovery,
+    expired-lease cleanup, ranking, and insertion consequently see one consistent
+    lease state and cannot hand the same receiver to concurrent automatic requests.
+    """
+    owner = owner.strip()
+    if not owner:
+        raise ValueError("owner is required")
+    frequency_hz, required_bandwidth_hz = int(frequency_hz), int(required_bandwidth_hz)
+    if frequency_hz < 0 or required_bandwidth_hz < 0:
+        raise ValueError("frequency and bandwidth must not be negative")
+    if preferred_role is not None and preferred_role not in ROLES:
+        raise ValueError(f"preferred_role must be one of {sorted(ROLES)}")
+    requested_id = "auto" if receiver_id in (None, "", "auto") else _identifier(receiver_id)
+    with _LOCK, _lease_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        now = datetime.now(timezone.utc)
+        connection.execute("DELETE FROM receiver_leases WHERE expires_at<=?", (now.isoformat(),))
+        leased = {row[0] for row in connection.execute("SELECT receiver_id FROM receiver_leases")}
+        items = _load()
+        if requested_id != "auto" and not any(x["receiver_id"] == requested_id for x in items):
+            raise KeyError(f"Unknown SDR receiver: {requested_id}")
+        compatible, rejected = [], []
+        for item in items:
+            if requested_id != "auto" and item["receiver_id"] != requested_id:
+                continue
+            reasons = []
+            if not item.get("enabled", False): reasons.append("disabled")
+            if require_verified and not item.get("verified", False): reasons.append("not verified")
+            if implemented_backends is not None and item["backend"] not in implemented_backends: reasons.append("capture backend not implemented")
+            if not any(low <= frequency_hz <= high for low, high in item["tuning_ranges_hz"]): reasons.append("frequency outside tuning ranges")
+            if required_bandwidth_hz > item["max_bandwidth_hz"]: reasons.append("required bandwidth too wide")
+            if item["receiver_id"] in leased: reasons.append("currently leased")
+            if reasons:
+                rejected.append({"receiver_id": item["receiver_id"], "reasons": reasons})
+            else:
+                role_match = preferred_role is not None and item["role"] == preferred_role
+                score = item["priority"] + (30 if role_match else 0) + (10 if item["verified"] else 0)
+                compatible.append((score, item["receiver_id"], item))
+        compatible.sort(key=lambda row: (-row[0], row[1]))
+        if not compatible:
+            detail = next((", ".join(x["reasons"]) for x in rejected if x["receiver_id"] == requested_id), "no compatible idle receiver")
+            label = f"Receiver {requested_id}" if requested_id != "auto" else "Automatic receiver assignment"
+            raise RuntimeError(f"{label} failed: {detail}")
+        score, _, selected = compatible[0]
+        lease = {"lease_id": f"lease-{uuid4().hex[:12]}", "receiver_id": selected["receiver_id"],
+                 "owner": owner[:100], "purpose": purpose.strip()[:200],
+                 "acquired_at": now.isoformat(), "heartbeat_at": now.isoformat(),
+                 "expires_at": (now + timedelta(seconds=LEASE_SECONDS)).isoformat()}
+        connection.execute("INSERT INTO receiver_leases VALUES (?,?,?,?,?,?,?)",
+                           tuple(lease[k] for k in ("lease_id", "receiver_id", "owner", "purpose", "acquired_at", "heartbeat_at", "expires_at")))
+        _LEASES[selected["receiver_id"]] = lease
+        assigned = {k: selected[k] for k in ("receiver_id", "name", "backend", "role")}
+        assigned.update(score=score, lease=lease)
+        return assigned
 
 
 def acquire_receiver(receiver_id: str, owner: str, purpose: str = "") -> dict:

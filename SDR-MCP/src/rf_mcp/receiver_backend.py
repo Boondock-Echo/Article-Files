@@ -14,6 +14,7 @@ from .airspyhf import AirspyError, Capture
 from .calibration import get_calibration
 from .sdr_coordinator import (
     acquire_receiver,
+    assign_and_acquire_receiver,
     ensure_airspy_default,
     get_receiver,
     heartbeat_receiver,
@@ -165,15 +166,30 @@ def capture_iq(
     receiver_id: str | None = None,
     lease_owner: str | None = None,
     purpose: str = "IQ capture",
+    required_bandwidth_hz: int = 0,
+    preferred_role: str | None = None,
     **options,
 ) -> Capture:
-    receiver, backend = resolve_receiver(receiver_id)
+    # Omitted IDs retain the established MCP default. Dashboard/API callers send
+    # the versioned policy value "auto" to opt into automatic admission.
+    if receiver_id is not None:
+        assigned = assign_and_acquire_receiver(
+            frequency_hz=center_frequency_hz, required_bandwidth_hz=required_bandwidth_hz,
+            receiver_id=receiver_id, preferred_role=preferred_role,
+            owner=lease_owner or f"capture-{uuid4().hex[:12]}", purpose=purpose,
+            implemented_backends=set(_BACKENDS),
+        )
+        receiver = get_receiver(assigned["receiver_id"])
+        backend = _BACKENDS[assigned["backend"]]
+        lease = assigned["lease"]
+    else:
+        receiver, backend = resolve_receiver(receiver_id)
+        lease = _lease(receiver, lease_owner, purpose)
     calibration = get_calibration(receiver["receiver_id"], required=False)
     if backend.name == "rtl_sdr" and calibration is not None:
         options.setdefault(
             "frequency_correction_ppm", round(calibration["frequency_correction_ppm"])
         )
-    lease = _lease(receiver, lease_owner, purpose)
     try:
         captured = backend.capture_iq(
             receiver, center_frequency_hz, duration_seconds, **options,
@@ -191,15 +207,28 @@ def stream_iq_chunks(
     receiver_id: str | None = None,
     lease_owner: str | None = None,
     purpose: str = "streaming IQ capture",
+    required_bandwidth_hz: int = 0,
+    preferred_role: str | None = None,
     **options,
 ) -> Iterator[np.ndarray]:
-    receiver, backend = resolve_receiver(receiver_id)
+    if receiver_id is not None:
+        assigned = assign_and_acquire_receiver(
+            frequency_hz=center_frequency_hz, required_bandwidth_hz=required_bandwidth_hz,
+            receiver_id=receiver_id, preferred_role=preferred_role,
+            owner=lease_owner or f"stream-{uuid4().hex[:12]}", purpose=purpose,
+            implemented_backends=set(_BACKENDS),
+        )
+        receiver = get_receiver(assigned["receiver_id"])
+        backend = _BACKENDS[assigned["backend"]]
+        lease = assigned["lease"]
+    else:
+        receiver, backend = resolve_receiver(receiver_id)
+        lease = _lease(receiver, lease_owner, purpose)
     calibration = get_calibration(receiver["receiver_id"], required=False)
     if backend.name == "rtl_sdr" and calibration is not None:
         options.setdefault(
             "frequency_correction_ppm", round(calibration["frequency_correction_ppm"])
         )
-    lease = _lease(receiver, lease_owner, purpose)
     try:
         last_heartbeat = time.monotonic()
         chunks = backend.stream_iq_chunks(
@@ -236,6 +265,10 @@ def offset_capture_center(
     target_frequency_hz: int, offset_hz: int = 50_000,
     receiver_id: str | None = None,
 ) -> int:
+    if receiver_id == "auto":
+        # Final compatibility and range validation happens atomically when the
+        # capture lease is acquired.
+        return int(target_frequency_hz) + int(offset_hz)
     receiver, _backend = resolve_receiver(receiver_id)
     target_frequency_hz = validate_frequency(target_frequency_hz, receiver["receiver_id"])
     for low, high in receiver["tuning_ranges_hz"]:

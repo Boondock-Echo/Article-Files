@@ -2875,6 +2875,7 @@ def receive_broadcast_fm(
     include_audio: bool = True,
     include_plot: bool = True,
     receiver_id: str | None = None,
+    preferred_role: str | None = None,
 ) -> CallToolResult:
     """Receive broadcast wideband FM and return mono/stereo audio and MPX metrics."""
     frequency_hz = int(frequency_hz)
@@ -2890,7 +2891,8 @@ def receive_broadcast_fm(
     receiver_center_hz = offset_capture_center(
         frequency_hz, offset_hz=150_000, receiver_id=receiver_id,
     )
-    capture_options = {"receiver_id": receiver_id} if receiver_id is not None else {}
+    capture_options = ({"receiver_id": receiver_id, "preferred_role": preferred_role,
+                        "required_bandwidth_hz": 200_000} if receiver_id is not None else {})
     capture = capture_iq(receiver_center_hz, duration_seconds, **capture_options)
     plot_path = None
     wav_path = None
@@ -2998,6 +3000,7 @@ def inspect_spectrum(
     retain_iq: bool = False,
     include_plot: bool = True,
     receiver_id: str | None = None,
+    preferred_role: str | None = None,
 ) -> CallToolResult:
     """Capture and inspect spectrum near a frequency, returning relative levels and peaks.
 
@@ -3011,7 +3014,8 @@ def inspect_spectrum(
         raise ValueError(f"max_peaks must be from 1 through {MAX_PEAKS}")
 
     ensure_data_dirs()
-    capture_options = {"receiver_id": receiver_id} if receiver_id is not None else {}
+    capture_options = ({"receiver_id": receiver_id, "preferred_role": preferred_role}
+                       if receiver_id is not None else {})
     capture = capture_iq(center_frequency_hz, duration_seconds, **capture_options)
     try:
         iq = load_complex_float32(capture.path)
@@ -3170,6 +3174,7 @@ def analyze_signal(
     include_audio: bool = True,
     include_plots: bool = True,
     receiver_id: str | None = None,
+    preferred_role: str | None = None,
 ) -> CallToolResult:
     """Measure and demodulate one RF signal as AM, USB, LSB, CW, or NFM.
 
@@ -3183,7 +3188,8 @@ def analyze_signal(
 
     ensure_data_dirs()
     receiver_center_hz = offset_capture_center(int(frequency_hz), receiver_id=receiver_id)
-    capture_options = {"receiver_id": receiver_id} if receiver_id is not None else {}
+    capture_options = ({"receiver_id": receiver_id, "preferred_role": preferred_role,
+                        "required_bandwidth_hz": bandwidth_hz} if receiver_id is not None else {})
     capture = capture_iq(receiver_center_hz, duration_seconds, **capture_options)
     try:
         iq = load_complex_float32(capture.path)
