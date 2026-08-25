@@ -229,6 +229,7 @@ def stream_iq_chunks(
         options.setdefault(
             "frequency_correction_ppm", round(calibration["frequency_correction_ppm"])
         )
+    chunks = None
     try:
         last_heartbeat = time.monotonic()
         chunks = backend.stream_iq_chunks(
@@ -241,6 +242,10 @@ def stream_iq_chunks(
                 last_heartbeat = time.monotonic()
             yield chunk
     finally:
+        if chunks is not None:
+            close = getattr(chunks, "close", None)
+            if close is not None:
+                close()
         release_receiver(lease["lease_id"])
 
 

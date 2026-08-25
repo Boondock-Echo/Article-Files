@@ -13,6 +13,7 @@ import numpy as np
 
 from .airspyhf import Capture
 from .config import CAPTURE_DIR, MAX_DURATION_SECONDS, MIN_DURATION_SECONDS, ensure_data_dirs
+from .subprocess_stream import read_chunks
 
 RTL_SDR = "rtl_sdr"
 RTL_TEST = "rtl_test"
@@ -232,17 +233,11 @@ def stream_iq_chunks(
             stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
             stderr_thread.start()
             assert process.stdout is not None
-            pending = bytearray()
-            while not stop_event.is_set() and time.monotonic() - started < duration_seconds:
-                block = process.stdout.read(chunk_bytes - len(pending))
-                if not block:
-                    break
-                pending.extend(block)
-                if len(pending) == chunk_bytes:
-                    yield _convert_cu8(bytes(pending))
-                    pending.clear()
-            if pending and len(pending) % 2 == 0:
-                yield _convert_cu8(bytes(pending))
+            for block in read_chunks(
+                process.stdout, chunk_bytes, stop_event, started + duration_seconds,
+            ):
+                if len(block) % 2 == 0:
+                    yield _convert_cu8(block)
         except FileNotFoundError as exc:
             raise RtlSdrError(f"Required executable not found: {command[0]}") from exc
         finally:
