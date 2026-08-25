@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import subprocess
 from importlib import resources
 from types import SimpleNamespace
 from urllib.parse import urlencode
@@ -127,6 +128,72 @@ def test_dashboard_assets_are_packaged_and_have_stable_landmarks():
     assert "function renderStatus" in script
     assert "function renderEmptyState" in script
     assert "uxStyle" not in script
+
+
+def test_storage_status_component_handles_capacity_states():
+    """Storage remains useful for complete, low, incomplete, and zero-sized data."""
+    script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
+        encoding="utf-8"
+    )
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the storage status model")
+    model = script[script.index("function storageStatusModel"):
+                   script.index("function renderStorageStatus")]
+    program = "const STORAGE_WARNING_PERCENT=85,STORAGE_CRITICAL_PERCENT=95;" + model + """
+const cases = [
+  storageStatusModel({filesystem:{total_bytes:1000,used_bytes:500,free_bytes:500}}),
+  storageStatusModel({filesystem:{total_bytes:1000,used_bytes:900,free_bytes:100}}),
+  storageStatusModel({filesystem:{total_bytes:1000,used_bytes:960,free_bytes:40}}),
+  storageStatusModel({filesystem:{free_bytes:100}}),
+  storageStatusModel({filesystem:{total_bytes:0,used_bytes:0,free_bytes:0}}),
+];
+console.log(JSON.stringify(cases));
+"""
+    result = subprocess.run(
+        [node, "-e", program], check=True, text=True, capture_output=True
+    )
+    cases = json.loads(result.stdout)
+    assert (cases[0]["percent"], cases[0]["tone"]) == (50, "normal")
+    assert (cases[1]["percent"], cases[1]["tone"]) == (90, "warning")
+    assert (cases[2]["percent"], cases[2]["tone"]) == (96, "critical")
+    assert cases[3]["percent"] is None and cases[3]["tone"] == "unknown"
+    assert cases[4]["percent"] is None and cases[4]["tone"] == "unknown"
+
+    assert "function renderStorageStatus" in script
+    assert "document.createElement('progress')" in script
+    assert "captures may fail" in script
+    assert "STORAGE_WARNING_PERCENT=85,STORAGE_CRITICAL_PERCENT=95" in script
+    assert "JSON.stringify(s,null,2)" not in script
+
+
+def test_catalog_storage_status_exposes_capacity_and_legacy_filesystem(tmp_path, monkeypatch):
+    from rf_mcp.catalog import Catalog
+    monkeypatch.setattr(
+        "rf_mcp.catalog.shutil.disk_usage",
+        lambda _path: SimpleNamespace(total=1000, used=400, free=600),
+    )
+    with Catalog(tmp_path) as catalog:
+        storage = catalog.storage_status()
+    assert storage["total_bytes"] == 1000
+    assert storage["used_bytes"] == 400
+    assert storage["free_bytes"] == 600
+    assert storage["used_percent"] == 40
+    assert storage["filesystem"] == {
+        "total_bytes": 1000, "used_bytes": 400, "free_bytes": 600,
+        "free_percent": 60,
+    }
+
+
+def test_dashboard_preserves_legacy_storage_fields(tmp_path, monkeypatch):
+    from rf_mcp import sdr_coordinator
+    monkeypatch.setattr(sdr_coordinator, "DATA_DIR", tmp_path)
+    messages = asyncio.run(request(
+        RfWebApp(downstream, FakeCatalog(), None, "0.58.0"), "/api/dashboard"
+    ))
+    storage = json.loads(response_body(messages))["storage"]
+    assert storage["total_size_bytes"] == 1234
+    assert storage["free_bytes"] == 10_000
 
 
 def test_dashboard_uses_centralized_semantic_timestamp_formatting():

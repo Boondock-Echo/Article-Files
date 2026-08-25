@@ -2687,13 +2687,20 @@ class Catalog:
             total = connection.execute(
                 "SELECT COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS size_bytes FROM artifacts"
             ).fetchone()
+        used_percent = 100 * usage.used / usage.total if usage.total else None
         return {
             "data_directory": str(self.data_dir),
+            # Top-level capacity fields make storage_status directly consumable while
+            # the established nested filesystem object remains backward compatible.
+            "total_bytes": usage.total,
+            "used_bytes": usage.used,
+            "free_bytes": usage.free,
+            "used_percent": used_percent,
             "filesystem": {
                 "total_bytes": usage.total,
                 "used_bytes": usage.used,
                 "free_bytes": usage.free,
-                "free_percent": 100 * usage.free / usage.total,
+                "free_percent": 100 * usage.free / usage.total if usage.total else None,
             },
             "cataloged_artifacts": dict(total),
             "by_kind": [dict(row) for row in rows],
