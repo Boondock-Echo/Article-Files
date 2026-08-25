@@ -162,6 +162,7 @@ class RfWebApp:
             self.signal_analyzer = services.signal_analyzer
             self.broadcast_fm_receiver = services.broadcast_fm_receiver
         self.live_audio = services.live_audio if services is not None else None
+        self.live_waterfall = services.live_waterfall if services is not None else None
         self._sessions: dict[str, float] = {}
         self._dashboard_assets: tuple[bytes, bytes, bytes] | None = None
 
@@ -345,6 +346,33 @@ class RfWebApp:
                 await _response(send, 200, _json_bytes(self.live_audio.stop(body.get("session_id"))))
             return
 
+        if path == "/api/live-waterfall" and scope.get("method") == "GET":
+            if not self._dashboard_authorized(scope):
+                await _response(send, 401, _json_bytes({"error": "unauthorized"}),
+                                extra_headers=[(b"www-authenticate", b"Bearer")])
+            else:
+                await self._live_waterfall_stream(scope, receive, send)
+            return
+        if path == "/api/live-waterfall/status" and scope.get("method") == "GET":
+            if not self._dashboard_authorized(scope):
+                await _response(send, 401, _json_bytes({"error": "unauthorized"}))
+            elif self.live_waterfall is None:
+                await _response(send, 503, _json_bytes({"error": "live_waterfall_unavailable"}))
+            else:
+                await _response(send, 200, _json_bytes(self.live_waterfall.status()),
+                                extra_headers=[(b"cache-control", b"no-store")])
+            return
+        if path == "/api/live-waterfall/stop" and scope.get("method") == "POST":
+            if not self._dashboard_authorized(scope):
+                await _response(send, 401, _json_bytes({"error": "unauthorized"}))
+            elif self.live_waterfall is None:
+                await _response(send, 503, _json_bytes({"error": "live_waterfall_unavailable"}))
+            else:
+                body = await self._read_json(receive)
+                await _response(send, 200, _json_bytes(self.live_waterfall.stop(body.get("session_id"))),
+                                extra_headers=[(b"cache-control", b"no-store")])
+            return
+
         match = _ARTIFACT_PATH.fullmatch(path)
         if match:
             if not self._dashboard_authorized(scope):
@@ -411,6 +439,51 @@ class RfWebApp:
                 chunk = frame_task.result()
                 if chunk is None: break
                 await send({"type": "http.response.body", "body": chunk, "more_body": True})
+        finally:
+            subscription.close()
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    async def _live_waterfall_stream(self, scope: dict, receive: Callable, send: Callable) -> None:
+        from .live_waterfall import LiveWaterfallConfig
+        if self.live_waterfall is None:
+            await _response(send, 503, _json_bytes({"error": "live_waterfall_unavailable"}))
+            return
+        try:
+            query = parse_qs(scope.get("query_string", b"").decode("ascii"), strict_parsing=True)
+            value = lambda key, default=None: query.get(key, [default])[0]
+            settings = LiveWaterfallConfig(
+                center_frequency_hz=int(value("center_frequency_hz")),
+                receiver_id=value("receiver_id") or None,
+                fft_size=int(value("fft_size", "4096")),
+                update_rate_hz=float(value("update_rate_hz", "10")),
+                span_hz=int(value("span_hz", "500000")),
+                minimum_power_db=float(value("minimum_power_db", "-110")),
+                maximum_power_db=float(value("maximum_power_db", "-20")),
+                display_bins=int(value("display_bins", "512")),
+                quantization_bits=int(value("quantization_bits", "8")),
+                maximum_duration_seconds=float(value("maximum_duration_seconds", "300")))
+            subscription = self.live_waterfall.subscribe(settings)
+        except (TypeError, ValueError) as exc:
+            await _response(send, 400, _json_bytes({"error": "invalid_live_waterfall_request", "detail": str(exc)}))
+            return
+        except RuntimeError as exc:
+            message = str(exc); status = 409 if "busy" in message else 503
+            await _response(send, status, _json_bytes({"error": "receiver_busy" if status == 409 else "live_waterfall_unavailable", "detail": message}))
+            return
+        await send({"type": "http.response.start", "status": 200, "headers": [
+            (b"content-type", b"application/x-ndjson; charset=utf-8"), (b"cache-control", b"no-store"),
+            (b"x-content-type-options", b"nosniff"), (b"x-accel-buffering", b"no")]})
+        try:
+            while True:
+                row_task = asyncio.create_task(asyncio.to_thread(subscription.rows.get))
+                disconnect_task = asyncio.create_task(receive())
+                done, pending = await asyncio.wait((row_task, disconnect_task), return_when=asyncio.FIRST_COMPLETED)
+                for task in pending: task.cancel()
+                if disconnect_task in done and disconnect_task.result().get("type") == "http.disconnect": break
+                if row_task not in done: continue
+                frame = row_task.result()
+                if frame is None: break
+                await send({"type": "http.response.body", "body": _json_bytes(frame), "more_body": True})
         finally:
             subscription.close()
         await send({"type": "http.response.body", "body": b"", "more_body": False})
