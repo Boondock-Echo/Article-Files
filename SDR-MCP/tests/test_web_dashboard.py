@@ -176,6 +176,44 @@ def test_dashboard_exposes_accessible_status_and_progress_semantics():
     assert "setAttribute('aria-label',jobLabel" in script
 
 
+def test_dashboard_has_contextual_operation_workspace_landmarks():
+    assets = resources.files("rf_mcp").joinpath("assets")
+    script = assets.joinpath("dashboard.js").read_text(encoding="utf-8")
+    stylesheet = assets.joinpath("dashboard.css").read_text(encoding="utf-8")
+
+    for view in ("scan", "fm", "digital", "sstv"):
+        assert f'data-operation-view="{view}"' in script
+        assert f'id="{view}WorkspaceProgress"' in script
+        assert f'id="{view}WorkspaceResults"' in script
+    for landmark in (
+        ".operation-workspace",
+        ".workspace-progress",
+        ".workspace-results",
+        ".progress-card",
+        ".empty-state",
+    ):
+        assert landmark in stylesheet
+
+
+def test_dashboard_javascript_routes_jobs_and_artifacts_to_workspaces():
+    script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
+        encoding="utf-8"
+    )
+
+    # These declarations are the JavaScript routing contract: contextual renderers
+    # filter jobs by type and resolve an artifact's originating job through job_id.
+    assert "scan:['band_scan','band_survey']" in script
+    assert "fm:['fm_broadcast_survey']" in script
+    assert "sstv:['sstv_decode','sstv_watch']" in script
+    assert "digital:['weak_signal_decode','fldigi_decode','digital_decode']" in script
+    assert "jobTypes.includes(j.job_type)" in script
+    assert "const job=jobs.get(a.job_id)" in script
+    assert "job&&jobTypes.includes(job.job_type)" in script
+    assert "renderOperationWorkspace(d,view,jobTypes" in script
+    # Home deliberately invokes both renderers without a type filter.
+    assert "renderJobProgressCards(d);renderResultCards(d);renderContextualWorkspaces(d)" in script
+
+
 def test_activity_drawer_has_dialog_and_keyboard_semantics():
     script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
         encoding="utf-8"
