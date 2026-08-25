@@ -114,8 +114,6 @@ def response_headers(messages):
 
 def test_live_waterfall_stream_delimits_each_ndjson_frame():
     rows = queue.Queue()
-    rows.put({"session_id": "waterfall-1", "sequence": 0, "row": "AA=="})
-    rows.put(None)
     subscription = SimpleNamespace(rows=rows, close=lambda: None)
     manager = SimpleNamespace(subscribe=lambda _settings: subscription)
     services = SimpleNamespace(spectrum_capture=None, signal_analyzer=None,
@@ -132,17 +130,30 @@ def test_live_waterfall_stream_delimits_each_ndjson_frame():
         async def send(message):
             messages.append(message)
 
-        await app._live_waterfall_stream({
+        task = asyncio.create_task(app._live_waterfall_stream({
             "query_string": urlencode({
                 "center_frequency_hz": 10_000_000,
             }).encode("ascii"),
-        }, receive, send)
+        }, receive, send))
+        # The initial body event must be sent before the first receiver row so
+        # the ASGI server flushes its headers and fetch() resolves in the browser.
+        for _ in range(100):
+            if len(messages) >= 2:
+                break
+            await asyncio.sleep(0.001)
+        assert messages[0]["type"] == "http.response.start"
+        assert messages[1] == {
+            "type": "http.response.body", "body": b"\n", "more_body": True,
+        }
+        rows.put({"session_id": "waterfall-1", "sequence": 0, "row": "AA=="})
+        rows.put(None)
+        await task
         return messages
 
     messages = asyncio.run(stream())
 
     chunks = [message["body"] for message in messages
-              if message["type"] == "http.response.body" and message["body"]]
+              if message["type"] == "http.response.body" and message["body"].strip()]
     assert len(chunks) == 1
     assert chunks[0].endswith(b"\n")
     assert json.loads(chunks[0]) == {
