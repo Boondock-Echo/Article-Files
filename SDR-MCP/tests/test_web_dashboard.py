@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from importlib import resources
 from types import SimpleNamespace
 from urllib.parse import urlencode
+
+import pytest
 
 from rf_mcp.web import RfWebApp
 
@@ -772,6 +775,10 @@ def test_dashboard_frequency_helpers_convert_validate_and_format_boundaries():
     """The browser helpers preserve integer-Hz API precision for every display unit."""
     import subprocess
 
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the dashboard JavaScript helpers")
+
     script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
         encoding="utf-8"
     )
@@ -795,7 +802,7 @@ for (const args of [['8.999','khz'], ['260.000001','mhz'], ['100.1234567','mhz']
 console.log(JSON.stringify({cases, invalid}));
 """
     result = subprocess.run(
-        ["node", "-e", program], check=True, text=True, capture_output=True
+        [node, "-e", program], check=True, text=True, capture_output=True
     )
     assert json.loads(result.stdout) == {
         "cases": [9000, 9000, 9000, 100100000, 14074001, 260000000,
