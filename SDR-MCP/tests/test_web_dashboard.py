@@ -166,6 +166,33 @@ def test_live_waterfall_stream_delimits_each_ndjson_frame():
     assert "frequency" not in json.dumps(metric).lower()
 
 
+def test_live_audio_forwards_first_body_immediately_without_coalescing():
+    frames = queue.Queue()
+    subscription = SimpleNamespace(session_id="audio-1", frames=frames, close=lambda: None)
+    manager = SimpleNamespace(subscribe=lambda _settings: subscription)
+    services = SimpleNamespace(spectrum_capture=None, signal_analyzer=None,
+                               broadcast_fm_receiver=None, live_audio=manager,
+                               live_waterfall=None)
+    app = RfWebApp(downstream, FakeCatalog(), None, "1.1.0", services=services)
+
+    async def stream():
+        messages = []
+        async def receive(): await asyncio.Future()
+        async def send(message): messages.append(message)
+        task = asyncio.create_task(app._live_audio_stream({"query_string": urlencode({
+            "frequency_hz": 100_000_000, "mode": "nfm", "bandwidth_hz": 12_500,
+        }).encode()}, receive, send))
+        frames.put(b"first-page")
+        while len(messages) < 2: await asyncio.sleep(.001)
+        assert messages[1]["body"] == b"first-page"
+        frames.put(b"second-page"); frames.put(None)
+        await task
+        return messages
+
+    bodies = [m["body"] for m in asyncio.run(stream()) if m["type"] == "http.response.body"]
+    assert bodies == [b"first-page", b"second-page", b""]
+
+
 def test_dashboard_assets_are_packaged_and_have_stable_landmarks():
     assets = resources.files("rf_mcp").joinpath("assets")
     document = assets.joinpath("dashboard.html").read_text(encoding="utf-8")
