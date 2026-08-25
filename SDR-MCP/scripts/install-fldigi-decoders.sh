@@ -9,30 +9,30 @@ if [[ -z "$service_home" || "$service_home" == "/" ]]; then
   echo "Unable to resolve a safe home directory for $service_user" >&2
   exit 1
 fi
-if [[ "$project_dir" != "$service_home/rf-mcp" ]]; then
-  echo "Install the project at $service_home/rf-mcp before enabling Fldigi." >&2
+if [[ "$project_dir" != "$service_home/SDR-MCP" ]]; then
+  echo "Install the project at $service_home/SDR-MCP before enabling Fldigi." >&2
   exit 1
 fi
 
 sudo apt update
 sudo apt install -y fldigi xvfb xauth alsa-utils
 
-echo snd-aloop | sudo tee /etc/modules-load.d/rf-mcp-snd-aloop.conf >/dev/null
+echo snd-aloop | sudo tee /etc/modules-load.d/SDR-MCP-snd-aloop.conf >/dev/null
 sudo modprobe snd-aloop
 
-mkdir -p "$service_home/rf-mcp-data/fldigi-config" "$service_home/rf-mcp-data/fldigi"
+mkdir -p "$service_home/SDR-MCP-data/fldigi-config" "$service_home/SDR-MCP-data/fldigi"
 service_tmp="$(mktemp)"
 trap 'rm -f "$service_tmp"' EXIT
 sed \
   -e "s|__RF_MCP_USER__|$service_user|g" \
   -e "s|__RF_MCP_HOME__|$service_home|g" \
-  "$project_dir/systemd/rf-mcp-fldigi.service" > "$service_tmp"
+  "$project_dir/systemd/SDR-MCP-fldigi.service" > "$service_tmp"
 
-sudo install -m 0644 "$service_tmp" /etc/systemd/system/rf-mcp-fldigi.service
+sudo install -m 0644 "$service_tmp" /etc/systemd/system/SDR-MCP-fldigi.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now rf-mcp-fldigi.service
+sudo systemctl enable --now SDR-MCP-fldigi.service
 sleep 3
-sudo systemctl --no-pager --full status rf-mcp-fldigi.service
+sudo systemctl --no-pager --full status SDR-MCP-fldigi.service
 
 echo "Fldigi is running on loopback-only XML-RPC port 7362."
-echo "Restart rf-mcp, then call get_fldigi_status and list_fldigi_modes."
+echo "Restart SDR-MCP, then call get_fldigi_status and list_fldigi_modes."

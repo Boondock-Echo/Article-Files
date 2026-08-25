@@ -1805,7 +1805,7 @@ def test_sstv_gallery_schema_migrates_from_v023():
 
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
-        database = root / "rf-mcp.sqlite3"
+        database = root / "SDR-MCP.sqlite3"
         with sqlite3.connect(database) as connection:
             connection.execute("""
                 CREATE TABLE sstv_images (
@@ -2122,7 +2122,7 @@ def test_sstv_alert_event_queues_filtered_signed_webhook_and_is_acknowledged():
         assert event["sstv_rule_id"] == rule["rule_id"]
         assert event["webhook_delivery_count"] == 1
         delivery = local_catalog.list_webhook_deliveries(event_id=event["event_id"])[0]
-        assert delivery["payload"]["schema"] == "rf-mcp.sstv-alert.v1"
+        assert delivery["payload"]["schema"] == "SDR-MCP.sstv-alert.v1"
         payload_image = delivery["payload"]["event"]["details"]["image"]
         assert payload_image["image_download_path"] == "/artifacts/art-image"
         assert "decoder_output" not in payload_image
@@ -2502,7 +2502,7 @@ def test_satellite_pass_scheduler_persists_and_launches_pass_aware_watcher():
         assert len(alerts) == 1
         assert alerts[0]["details"]["event_kind"] == "prepass"
         deliveries = local_catalog.list_webhook_deliveries(event_id=alerts[0]["event_id"])
-        assert deliveries[0]["payload"]["schema"] == "rf-mcp.satellite-pass.v1"
+        assert deliveries[0]["payload"]["schema"] == "SDR-MCP.satellite-pass.v1"
 
         local_catalog.upsert_job(
             "sstv-watch-pass", "sstv_watch", "completed",
@@ -2590,7 +2590,7 @@ def test_celestrak_fetch_is_catalog_scoped_and_size_bounded(monkeypatch):
     result = fetch_celestrak_tle(25544)
     assert result["tle_line1"] == ISS_TLE_1
     assert captured["url"].endswith("CATNR=25544&FORMAT=TLE")
-    assert captured["agent"] == "rf-mcp-tle/0.50"
+    assert captured["agent"] == "SDR-MCP-tle/0.50"
     assert captured["read_count"] == 8193
     try:
         fetch_celestrak_tle(100000)

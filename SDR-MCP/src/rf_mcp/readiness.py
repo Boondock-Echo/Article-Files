@@ -41,7 +41,7 @@ def release_readiness(catalog: Catalog, *, probe_hardware: bool = False) -> dict
     required_failures = [item for item in checks if item["required"] and not item["passed"]]
     warnings = [item for item in checks if not item["required"] and not item["passed"]]
     return {
-        "schema": "rf-mcp.release-readiness.v1", "ready": not required_failures,
+        "schema": "SDR-MCP.release-readiness.v1", "ready": not required_failures,
         "status": "ready" if not required_failures and not warnings else
                   ("ready_with_warnings" if not required_failures else "not_ready"),
         "checks": checks, "required_failure_count": len(required_failures),

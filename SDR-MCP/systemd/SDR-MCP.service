@@ -7,14 +7,14 @@ Wants=network-online.target
 Type=simple
 User=__RF_MCP_USER__
 Group=__RF_MCP_USER__
-WorkingDirectory=__RF_MCP_HOME__/rf-mcp
+WorkingDirectory=__RF_MCP_HOME__/SDR-MCP
 Environment=RF_MCP_HOST=0.0.0.0
 Environment=RF_MCP_PORT=8765
 Environment=RF_MCP_TRANSPORT=streamable-http
-Environment=RF_MCP_DATA_DIR=__RF_MCP_HOME__/rf-mcp-data
-Environment=MPLCONFIGDIR=__RF_MCP_HOME__/rf-mcp-data/matplotlib-cache
-EnvironmentFile=-/etc/rf-mcp.env
-ExecStart=__RF_MCP_HOME__/rf-mcp/.venv/bin/rf-mcp
+Environment=RF_MCP_DATA_DIR=__RF_MCP_HOME__/SDR-MCP-data
+Environment=MPLCONFIGDIR=__RF_MCP_HOME__/SDR-MCP-data/matplotlib-cache
+EnvironmentFile=-/etc/SDR-MCP.env
+ExecStart=__RF_MCP_HOME__/SDR-MCP/.venv/bin/SDR-MCP
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -27,7 +27,7 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
 RestrictRealtime=true
-ReadWritePaths=__RF_MCP_HOME__/rf-mcp-data
+ReadWritePaths=__RF_MCP_HOME__/SDR-MCP-data
 
 [Install]
 WantedBy=multi-user.target

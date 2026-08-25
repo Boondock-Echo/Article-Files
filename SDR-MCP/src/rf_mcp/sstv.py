@@ -230,7 +230,7 @@ class SSTVManager:
                 catalog.upsert_job(job_id, "sstv_decode", "queued", config=config,
                                    created_at=job.created_at)
                 job.thread = threading.Thread(
-                    target=self._run, args=(job,), name=f"rf-mcp-{job_id}", daemon=True
+                    target=self._run, args=(job,), name=f"SDR-MCP-{job_id}", daemon=True
                 )
                 job.thread.start()
             except Exception:

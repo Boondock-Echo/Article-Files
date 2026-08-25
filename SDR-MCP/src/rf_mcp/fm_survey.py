@@ -200,7 +200,7 @@ class FMSurveyManager:
                 self._jobs[job.job_id] = job
                 self._checkpoint(job)
                 job.thread = threading.Thread(
-                    target=self._run, args=(job,), name=f"rf-mcp-{job.job_id}", daemon=True
+                    target=self._run, args=(job,), name=f"SDR-MCP-{job.job_id}", daemon=True
                 )
                 job.thread.start()
             except Exception:

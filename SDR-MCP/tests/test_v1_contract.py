@@ -11,7 +11,7 @@ from rf_mcp import readiness
 def test_v1_contract_is_machine_readable_and_additive_client_safe():
     contract = contract_document("1.0.0")
     assert API_VERSION == contract["api_version"] == "1.0"
-    assert contract["schema"] == "rf-mcp.api-contract.v1"
+    assert contract["schema"] == "SDR-MCP.api-contract.v1"
     assert contract["stability"] == "stable"
     assert contract["frequency_unit"] == "Hz"
     assert contract["compatibility_rules"]["client_rule"].startswith("Ignore unknown")
@@ -53,7 +53,7 @@ def test_release_readiness_rejects_unauthenticated_lan_bind(tmp_path, monkeypatc
 
 
 def test_v069_catalog_upgrades_in_place_without_losing_jobs(tmp_path):
-    database = tmp_path / "rf-mcp.sqlite3"
+    database = tmp_path / "SDR-MCP.sqlite3"
     with sqlite3.connect(database) as connection:
         connection.execute(
             """CREATE TABLE jobs (

@@ -37,7 +37,7 @@ def _download_text(url: str, *, timeout_seconds: float = 15.0,
                 return str(cached["body"])
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
             pass
-    request = Request(url, headers={"User-Agent": "rf-mcp-catalog/0.50"})
+    request = Request(url, headers={"User-Agent": "SDR-MCP-catalog/0.50"})
     with urlopen(request, timeout=max(3.0, min(float(timeout_seconds), 30.0))) as response:  # noqa: S310
         if getattr(response, "status", 200) != 200:
             raise RuntimeError(f"Satellite catalog returned HTTP {response.status}")
