@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import queue
 import shutil
 import subprocess
 from importlib import resources
@@ -109,6 +110,44 @@ def response_body(messages):
 
 def response_headers(messages):
     return dict(messages[0]["headers"])
+
+
+def test_live_waterfall_stream_delimits_each_ndjson_frame():
+    rows = queue.Queue()
+    rows.put({"session_id": "waterfall-1", "sequence": 0, "row": "AA=="})
+    rows.put(None)
+    subscription = SimpleNamespace(rows=rows, close=lambda: None)
+    manager = SimpleNamespace(subscribe=lambda _settings: subscription)
+    services = SimpleNamespace(spectrum_capture=None, signal_analyzer=None,
+                               broadcast_fm_receiver=None, live_audio=None,
+                               live_waterfall=manager)
+    app = RfWebApp(downstream, FakeCatalog(), None, "1.1.0", services=services)
+
+    async def stream():
+        messages = []
+
+        async def receive():
+            await asyncio.Future()
+
+        async def send(message):
+            messages.append(message)
+
+        await app._live_waterfall_stream({
+            "query_string": urlencode({
+                "center_frequency_hz": 10_000_000,
+            }).encode("ascii"),
+        }, receive, send)
+        return messages
+
+    messages = asyncio.run(stream())
+
+    chunks = [message["body"] for message in messages
+              if message["type"] == "http.response.body" and message["body"]]
+    assert len(chunks) == 1
+    assert chunks[0].endswith(b"\n")
+    assert json.loads(chunks[0]) == {
+        "session_id": "waterfall-1", "sequence": 0, "row": "AA==",
+    }
 
 
 def test_dashboard_assets_are_packaged_and_have_stable_landmarks():

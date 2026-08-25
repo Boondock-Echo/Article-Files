@@ -524,7 +524,9 @@ class RfWebApp:
                 if row_task not in done: continue
                 frame = row_task.result()
                 if frame is None: break
-                await send({"type": "http.response.body", "body": _json_bytes(frame), "more_body": True})
+                # NDJSON records must be newline-delimited.  Without the delimiter the
+                # dashboard keeps every row in its pending buffer and never renders it.
+                await send({"type": "http.response.body", "body": _json_bytes(frame) + b"\n", "more_body": True})
         finally:
             subscription.close()
         await send({"type": "http.response.body", "body": b"", "more_body": False})
