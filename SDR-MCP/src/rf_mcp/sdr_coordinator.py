@@ -9,6 +9,7 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 from uuid import uuid4
 
 from .config import DATA_DIR, SAMPLE_RATE, TUNING_RANGES_HZ, ensure_data_dirs
@@ -27,6 +28,22 @@ _LOCK = threading.RLock()
 # Kept as a compatibility/testing hook; durable leases live in SQLite.
 _LEASES: dict[str, dict] = {}
 LEASE_SECONDS = 30 * 60
+_LEASE_RELEASE_LISTENERS: list[Callable[[], None]] = []
+
+
+def add_lease_release_listener(callback: Callable[[], None]) -> None:
+    """Register a lightweight callback used to wake admission dispatchers."""
+    if callback not in _LEASE_RELEASE_LISTENERS:
+        _LEASE_RELEASE_LISTENERS.append(callback)
+
+
+def _notify_lease_released() -> None:
+    for callback in tuple(_LEASE_RELEASE_LISTENERS):
+        try:
+            callback()
+        except Exception:
+            # Releasing hardware must succeed even if an observer is shutting down.
+            pass
 
 
 def _path() -> Path:
@@ -475,6 +492,7 @@ def release_receiver(lease_id: str) -> dict:
             if row is not None:
                 connection.execute("DELETE FROM receiver_leases WHERE lease_id=?", (lease_id,))
                 _LEASES.pop(row["receiver_id"], None)
+                _notify_lease_released()
                 return {"released": True, "lease": dict(row)}
     raise KeyError(f"Unknown active lease: {lease_id}")
 
