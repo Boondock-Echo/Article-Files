@@ -55,6 +55,7 @@ from .monitoring import monitor_manager
 from .live_iq import LiveIQManager
 from .notifications import WebhookDispatcher, normalize_webhook_destination
 from .operations import acquire_long_job, active_long_job, release_long_job
+from .job_queue import Dispatcher, JobQueue
 from .presets import PRESET_TYPES, normalize_preset
 from .propagation import (
     fetch_space_weather,
@@ -211,6 +212,10 @@ _SERVER_STARTED_MONOTONIC = time.monotonic()
 _MAX_INLINE_ARTIFACT_BYTES = int(os.getenv("RF_MCP_MAX_INLINE_ARTIFACT_BYTES", "10485760"))
 _INTERRUPTED_JOBS_ON_STARTUP = catalog.mark_interrupted_jobs()
 receiver_service = ReceiverService()
+job_admission_queue = JobQueue()
+job_dispatcher = Dispatcher(job_admission_queue)
+from .sdr_coordinator import add_lease_release_listener
+add_lease_release_listener(job_dispatcher.wake)
 live_iq_manager = LiveIQManager()
 
 
@@ -648,6 +653,35 @@ def acquire_sdr_receiver(receiver_id: str, owner: str, purpose: str = "") -> dic
 def release_sdr_receiver(lease_id: str) -> dict:
     """Release a process-local v0.41 receiver lease by lease ID."""
     return release_receiver(lease_id)
+
+
+@mcp.tool()
+def list_admission_jobs(state: str | None = None, limit: int = 200) -> dict:
+    """List durable queued/running RF jobs, assignments, and blocking reasons."""
+    states = [state] if state else None
+    jobs = job_admission_queue.list(states=states, limit=limit)
+    return {"count": len(jobs), "jobs": jobs}
+
+
+@mcp.tool()
+def get_admission_job(queue_id: str) -> dict:
+    """Get a durable job's queue position, effective priority, and blockers."""
+    return job_admission_queue.get(queue_id)
+
+
+@mcp.tool()
+def cancel_admission_job(queue_id: str) -> dict:
+    """Cancel queued work, or request cooperative cancellation of active work."""
+    result = job_admission_queue.cancel(queue_id)
+    job_dispatcher.wake()
+    return result
+
+
+@mcp.tool()
+def poll_admission_job_changes(after_revision: int = 0, timeout_seconds: float = 30) -> dict:
+    """Long-poll for queue state changes (timeouts are capped at 60 seconds)."""
+    return job_admission_queue.wait_for_change(after_revision=after_revision,
+                                                timeout=timeout_seconds)
 
 
 @mcp.tool()
@@ -4336,6 +4370,7 @@ def main() -> None:
                        broadcast_fm_receiver=receive_broadcast_fm,
                        live_audio=live_audio_manager,
                        live_waterfall=live_waterfall_manager)
+        job_dispatcher.start()
         app = RfWebApp(mcp.streamable_http_app(), catalog, token, __version__,
                        inspect_spectrum, analyze_signal, receive_broadcast_fm,
                        save_rf_schedule, run_rf_schedule_now, set_rf_schedule_enabled,
@@ -4354,13 +4389,15 @@ def main() -> None:
                        sstv_stop=stop_sstv,
                        sstv_watch_stop=stop_sstv_watcher,
                        sstv_capabilities=list_sstv_decoder_capabilities,
-                       services=application_services)
+                       services=application_services,
+                       job_queue=job_admission_queue)
         uvicorn.run(
             app,
             host=os.getenv("RF_MCP_HOST", "127.0.0.1"),
             port=int(os.getenv("RF_MCP_PORT", "8765")),
         )
     finally:
+        job_dispatcher.stop()
         live_audio_manager.shutdown()
         live_waterfall_manager.shutdown()
         satellite_scheduler.stop()

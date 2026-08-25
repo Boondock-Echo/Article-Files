@@ -120,7 +120,8 @@ class RfWebApp:
                  sstv_stop: Callable | None = None,
                  sstv_watch_stop: Callable | None = None,
                  sstv_capabilities: Callable | None = None,
-                 services: RfApplicationServices | None = None):
+                 services: RfApplicationServices | None = None,
+                 job_queue=None):
         self.mcp_app = mcp_app
         self.catalog = catalog
         self.token = validate_api_token(token)
@@ -157,6 +158,7 @@ class RfWebApp:
         self.sstv_watch_stop = sstv_watch_stop
         self.sstv_capabilities = sstv_capabilities
         self.services = services
+        self.job_queue = job_queue
         if services is not None:
             self.spectrum_capture = services.spectrum_capture
             self.signal_analyzer = services.signal_analyzer
@@ -254,7 +256,45 @@ class RfWebApp:
                 await self._dashboard_history(scope, send, path.rsplit("/", 1)[-1])
             return
 
+        if path == "/api/admission/jobs" and scope.get("method") == "GET":
+            if not self._dashboard_authorized(scope):
+                await _response(send, 401, _json_bytes({"error": "unauthorized"}),
+                                extra_headers=[(b"www-authenticate", b"Bearer")])
+            elif self.job_queue is None:
+                await _response(send, 503, _json_bytes({"error": "job_queue_unavailable"}))
+            else:
+                query = parse_qs(scope.get("query_string", b"").decode("ascii", "strict"))
+                states = query.get("state") or None
+                jobs = self.job_queue.list(states=states, limit=int(query.get("limit", ["200"])[0]))
+                await _response(send, 200, _json_bytes({"count": len(jobs), "jobs": jobs}))
+            return
+
+        if path.startswith("/api/admission/jobs/") and scope.get("method") == "GET":
+            if not self._dashboard_authorized(scope):
+                await _response(send, 401, _json_bytes({"error": "unauthorized"}))
+            elif self.job_queue is None:
+                await _response(send, 503, _json_bytes({"error": "job_queue_unavailable"}))
+            else:
+                queue_id = unquote(path.removeprefix("/api/admission/jobs/"))
+                try: await _response(send, 200, _json_bytes(self.job_queue.get(queue_id)))
+                except KeyError as exc: await _response(send, 404, _json_bytes({"error": str(exc)}))
+            return
+
+        if path == "/api/admission/changes" and scope.get("method") == "GET":
+            if not self._dashboard_authorized(scope):
+                await _response(send, 401, _json_bytes({"error": "unauthorized"}))
+            elif self.job_queue is None:
+                await _response(send, 503, _json_bytes({"error": "job_queue_unavailable"}))
+            else:
+                query = parse_qs(scope.get("query_string", b"").decode("ascii", "strict"))
+                result = await asyncio.to_thread(self.job_queue.wait_for_change,
+                    after_revision=int(query.get("after", ["0"])[0]),
+                    timeout=float(query.get("timeout", ["30"])[0]))
+                await _response(send, 200, _json_bytes(result))
+            return
+
         operations = {
+            "/api/admission/jobs/cancel": self._cancel_admission_job,
             "/api/receivers/discover": self._discover_receivers,
             "/api/receivers/register": self._register_receiver,
             "/api/station-memories": self._create_station_memory,
@@ -645,6 +685,14 @@ body{{margin:0;background:#08111f;color:#e5edf8;font:16px system-ui;display:grid
         except (ValueError, UnicodeDecodeError) as exc:
             await _response(send, 400, _json_bytes({"error": "invalid_parameters",
                                                     "detail": str(exc)}))
+
+    async def _cancel_admission_job(self, receive: Callable, send: Callable) -> None:
+        if self.job_queue is None:
+            await _response(send, 503, _json_bytes({"error": "job_queue_unavailable"}))
+            return
+        await self._operation(receive, send, allowed={"queue_id"},
+                              callback=self.job_queue.cancel,
+                              unavailable="job_queue_unavailable")
 
     async def _json_request(self, receive: Callable) -> dict:
         body = bytearray()
