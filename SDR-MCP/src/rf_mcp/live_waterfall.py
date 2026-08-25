@@ -14,6 +14,7 @@ from uuid import uuid4
 import numpy as np
 
 from . import config, receiver_backend
+from .live_iq import LiveIQManager
 
 
 class LiveWaterfallState(StrEnum):
@@ -125,23 +126,25 @@ class WaterfallSubscription:
 
 
 class LiveWaterfallManager:
-    def __init__(self):
+    def __init__(self, iq_manager: LiveIQManager | None = None):
         self._lock = threading.RLock(); self._sessions = {}; self._listeners = {}; self._stops = {}
         self._rows = {}; self._history = deque(maxlen=config.LIVE_AUDIO_HISTORY_SIZE)
+        self.iq_manager = iq_manager or LiveIQManager()
 
     def subscribe(self, requested: LiveWaterfallConfig) -> WaterfallSubscription:
         cfg = requested.validated(); receiver, _ = receiver_backend.resolve_receiver(cfg.receiver_id); rid = receiver["receiver_id"]
         with self._lock:
-            active = next((s for s in self._sessions.values() if s.receiver_id == rid and s.state in
+            active = next((s for s in self._sessions.values() if s.receiver_id == rid and
+                           s.config == cfg and s.state in
                            (LiveWaterfallState.STARTING, LiveWaterfallState.STREAMING)), None)
-            if active and active.config != cfg: raise RuntimeError("receiver busy with an incompatible live waterfall")
             session = active
             if session is None:
+                iq_subscription = self.iq_manager.subscribe(cfg.center_frequency_hz, rid)
                 session = _Session(uuid4().hex, cfg, rid, LiveWaterfallState.STARTING, _now())
                 self._sessions[session.session_id] = session; self._listeners[session.session_id] = []
                 self._rows[session.session_id] = deque(maxlen=config.LIVE_WATERFALL_HISTORY_ROWS)
                 stop = threading.Event(); self._stops[session.session_id] = stop
-                threading.Thread(target=self._produce, args=(session, stop), daemon=True,
+                threading.Thread(target=self._produce, args=(session, stop, iq_subscription), daemon=True,
                                  name=f"live-waterfall-{rid}").start()
             if session.client_count >= config.LIVE_WATERFALL_MAX_CLIENTS: raise RuntimeError("live waterfall client limit reached")
             rows = queue.Queue(maxsize=config.LIVE_WATERFALL_QUEUE_ROWS)
@@ -161,17 +164,18 @@ class LiveWaterfallManager:
                 try: listener.put_nowait(frame)
                 except queue.Full: pass
 
-    def _produce(self, session, stop):
-        generator = None
+    def _produce(self, session, stop, iq_subscription):
         try:
             cfg = session.config; window = np.hanning(cfg.fft_size).astype(np.float32)
             pending = np.empty(0, np.complex64); next_row = time.monotonic()
             session.state = LiveWaterfallState.STREAMING; session.started_at = _now()
-            generator = receiver_backend.stream_iq_chunks(cfg.center_frequency_hz,
-                duration_seconds=cfg.maximum_duration_seconds, stop_event=stop,
-                receiver_id=session.receiver_id, lease_owner=f"waterfall-{session.session_id}", purpose="live waterfall")
-            for chunk in generator:
-                if stop.is_set(): break
+            deadline = time.monotonic() + cfg.maximum_duration_seconds
+            while not stop.is_set() and time.monotonic() < deadline:
+                try: chunk = iq_subscription.chunks.get(timeout=min(.1, max(0, deadline-time.monotonic())))
+                except queue.Empty: continue
+                if chunk is None:
+                    if iq_subscription.error: raise RuntimeError(iq_subscription.error)
+                    break
                 pending = np.concatenate((pending, complex_iq(chunk)))
                 while pending.size >= cfg.fft_size:
                     block, pending = pending[:cfg.fft_size], pending[cfg.fft_size:]
@@ -191,9 +195,7 @@ class LiveWaterfallManager:
             session.error = f"{type(exc).__name__}: {str(exc)[:240]}"
         finally:
             stop.set()
-            if generator is not None:
-                try: generator.close()
-                except Exception: pass
+            iq_subscription.close()
             session.ended_at = _now(); self._broadcast(session, None)
             with self._lock: self._history.append(session.public())
 
@@ -204,7 +206,7 @@ class LiveWaterfallManager:
             session = self._sessions.get(session_id)
             if session: session.client_count = len(listeners)
             if session and not listeners and session.state in (LiveWaterfallState.STARTING, LiveWaterfallState.STREAMING):
-                session.state = LiveWaterfallState.STOPPING; session.termination_reason = "last_listener_disconnected"
+                session.state = LiveWaterfallState.STOPPING; session.termination_reason = "stopped"
                 self._stops[session_id].set()
 
     def status(self):
@@ -219,7 +221,9 @@ class LiveWaterfallManager:
                     if session.state in (LiveWaterfallState.STARTING, LiveWaterfallState.STREAMING): session.state = LiveWaterfallState.STOPPING
             return {"stopped": found, "session_id": session_id}
 
-    def shutdown(self): self.stop()
+    def shutdown(self):
+        self.stop()
+        self.iq_manager.shutdown()
 
 
 def _now(): return datetime.now(timezone.utc).isoformat()
