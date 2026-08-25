@@ -130,6 +130,40 @@ def test_dashboard_assets_are_packaged_and_have_stable_landmarks():
     assert "uxStyle" not in script
 
 
+def test_dashboard_preferences_are_versioned_validated_and_safe():
+    script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
+        encoding="utf-8"
+    )
+    module = script[script.index("const dashboardPreferences="):
+                    script.index("const setupProgress=")]
+
+    assert "rf-mcp.dashboard.preferences.v1" in module
+    assert "parsed.version===version" in module
+    assert "localStorage.getItem(key)" in module
+    assert "localStorage.setItem(key,JSON.stringify(state))" in module
+    assert "localStorage.removeItem(key)" in module
+    assert "catch(_error)" in module
+
+    # Selects must still expose the stored option, while numeric values must
+    # remain inside the bounds currently declared by the dashboard control.
+    assert "[...control.options].some" in module
+    assert "option.value===value&&!option.disabled" in module
+    assert "number>=min&&number<=max" in module
+    for preference in ("duration", "fft", "audioMode", "audioBandwidth",
+                       "fmDeemphasis", "spotFilter", "jobStateFilter"):
+        assert f"'{preference}'" in module
+
+    # The explicit allow-list must not grow accidentally from form serialization.
+    for forbidden in ("token", "job_id", "session", "liveUrl", "activeLive"):
+        assert f"'{forbidden}'" not in module
+    assert "new FormData" not in module
+
+    assert "Reset dashboard preferences" in module
+    assert "confirmAndRun({operation:'Reset dashboard preferences?'" in module
+    assert "dashboardPreferences.section()" in script
+    assert "dashboardPreferences.setSection(id)" in script
+
+
 def test_storage_status_component_handles_capacity_states():
     """Storage remains useful for complete, low, incomplete, and zero-sized data."""
     script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
@@ -303,7 +337,7 @@ def test_dashboard_navigation_restores_history_and_active_semantics():
     assert "history.pushState({view:id,resultId}" in script
     assert "window.addEventListener('popstate',restoreHashView)" in script
     assert "window.addEventListener('hashchange',restoreHashView)" in script
-    assert "showView(view||'home',{updateHistory:false,resultId:" in script
+    assert "showView(view||dashboardPreferences.section(),{updateHistory:false,resultId:" in script
     assert "heading.focus()" in script
     for legacy_hash in ("listen", "scan", "system"):
         assert f"'{legacy_hash}'" in script
