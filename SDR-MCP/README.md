@@ -2449,3 +2449,43 @@ application upgrade.
 
 Reconnect or refresh the server in MCP Inspector so it reloads the updated
 `inspect_spectrum` input and output schemas.
+
+## Live browser audio
+
+The dashboard's **Tune and listen** and **Broadcast FM and RDS** panels provide
+artifact-free **Listen live** controls separately from recording. Live AM, NFM,
+USB, LSB, CW, and mono Broadcast FM are delivered as 48 kHz Ogg/Opus; stereo FM
+is deferred until a continuous pilot PLL is available. Starting live listening
+does not create IQ, WAV, plots, result JSON, or catalog artifacts.
+
+`GET /api/live-audio` accepts `frequency_hz`, `mode`, `bandwidth_hz`, optional
+`receiver_id`, `deemphasis_us` (50 or 75), and `maximum_duration_seconds`.
+`GET /api/live-audio/status` returns sanitized session metadata and
+`POST /api/live-audio/stop` stops one session (JSON `session_id`) or all sessions.
+All three use the same bearer token or dashboard session authentication as the
+recording APIs. For example:
+
+```sh
+curl -N -H "Authorization: Bearer $RF_MCP_API_TOKEN" \
+  'http://127.0.0.1:8765/api/live-audio?frequency_hz=100100000&mode=broadcast_fm&bandwidth_hz=200000' \
+  | ffplay -i pipe:0
+```
+
+FFmpeg with `libopus` is required only for live audio; readiness reports its
+absence without disabling recording. One producer owns the receiver lease and
+identically tuned authorized listeners may share it. An incompatible retune is
+rejected. The final listener disconnect, explicit stop, configured duration
+limit, application shutdown, or error releases the lease promptly. Slow clients
+are kept at the live edge by dropping their oldest buffered encoded chunk.
+Defaults are bounded by `RF_MCP_LIVE_MAX_DURATION`, `RF_MCP_LIVE_MAX_CLIENTS`,
+`RF_MCP_LIVE_CHUNK_SECONDS`, `RF_MCP_LIVE_IDLE_TIMEOUT`, and
+`RF_MCP_LIVE_QUEUE_CHUNKS`.
+
+Reverse proxies must disable response buffering (for nginx,
+`proxy_buffering off`) and use a read timeout longer than the configured maximum
+session duration. They must preserve streaming/chunked responses and must not
+synthesize a `Content-Length` header.
+
+MCP tools expose capabilities, sanitized session status, and stop control. MCP
+results are not the media transport and never contain bearer tokens or base64
+media; clients consume the authenticated HTTP endpoint.

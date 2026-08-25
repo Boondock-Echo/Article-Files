@@ -40,3 +40,12 @@
 ## 0.64.0
 
 - Introduced the receiver-backend interface.
+
+## 1.1.0 - 2026-08-25
+
+- Added bounded, artifact-free 48 kHz mono live audio for AM, NFM, USB, LSB, CW,
+  and Broadcast FM over authenticated Ogg/Opus HTTP streaming.
+- Added live session status/stop HTTP endpoints, dashboard controls, readiness
+  capabilities, and MCP discovery/lifecycle tools.
+- Preserved all existing recording, artifact, Broadcast FM/RDS, and demodulation
+  interfaces unchanged.

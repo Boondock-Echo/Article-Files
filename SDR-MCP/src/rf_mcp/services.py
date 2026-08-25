@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from .catalog import Catalog
 from .sdr_coordinator import (
@@ -37,6 +37,7 @@ class RfApplicationServices:
     spectrum_capture: Callable
     signal_analyzer: Callable
     broadcast_fm_receiver: Callable
+    live_audio: Any | None = None
 
     def recovery_status(self, interrupted_jobs_on_startup: int) -> dict:
         return {

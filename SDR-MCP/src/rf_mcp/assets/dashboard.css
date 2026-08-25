@@ -38,3 +38,4 @@ progress.progressTrack::-moz-progress-bar,progress.bandProgress::-moz-progress-b
 @media(max-width:600px){.image-viewer{width:100vw;height:100dvh;border:0;border-radius:0}.image-viewer-shell{padding:10px}.image-viewer-toolbar a{margin-left:0}.image-viewer-toolbar{justify-content:center}.image-thumbnail-actions{flex-wrap:wrap}}
 @media(forced-colors:active){.image-viewer,.image-viewer-viewport,.image-thumbnail{border:2px solid CanvasText}.image-viewer::backdrop{background:Canvas}.image-viewer-toolbar button,.image-viewer-toolbar a{forced-color-adjust:auto}}
 @media(prefers-reduced-motion:reduce){.image-viewer-image{transition:none}.image-viewer::backdrop{backdrop-filter:none}}
+.live-button{background:#087f5b;color:#fff}.stop-button{background:#b42318;color:#fff}.live-state{font-weight:700}.live-state[data-state="Live"]{color:#087f5b}.live-state[data-state="Failed"]{color:#b42318}button:disabled{cursor:not-allowed;opacity:.55}
