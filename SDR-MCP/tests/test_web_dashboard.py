@@ -1247,3 +1247,22 @@ def test_dashboard_history_filter_contract():
     assert "No RF jobs match these filters" in script
     assert "No artifacts match these filters" in script
     assert "next_cursor" in script and "Showing ${state.items.length}" in script
+
+
+def test_spectrum_results_enumerate_peaks_and_offer_contextual_actions():
+    assets = resources.files("rf_mcp").joinpath("assets")
+    document = assets.joinpath("dashboard.html").read_text(encoding="utf-8")
+    script = assets.joinpath("dashboard.js").read_text(encoding="utf-8")
+
+    for landmark in ("spectrumPeaks", "spectrumPeakRows"):
+        assert f'id="{landmark}"' in document
+    for heading in ("Frequency", "Level", "Above noise", "Suggested actions"):
+        assert f"<th>{heading}</th>" in document
+    assert "renderSpectrumPeaks(d.peaks||[])" in script
+    assert "FT8_DIAL_FREQUENCIES_HZ" in script
+    assert "SSTV_ACTIVITY_FREQUENCIES_HZ" in script
+    for action in ("Decode broadcast FM", "Decode FT8", "Decode SSTV", "Tune & listen"):
+        assert action in script
+    assert "setFrequencyInput('digitalFrequency',ft8Dial)" in script
+    assert "setFrequencyInput('sstvFrequency',sstvFrequency)" in script
+    assert "setFrequencyInput('fmFrequency',frequencyHz)" in script
