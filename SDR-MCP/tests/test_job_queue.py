@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from rf_mcp.job_queue import JobQueue, VALID_TRANSITIONS
+from rf_mcp.cooperative_cancellation import ActiveOperationRegistry
 
 
 def receiver(receiver_id, low, high, *, backend="rtl_sdr"):
@@ -97,3 +98,72 @@ def test_transitions_are_central_and_enforced(tmp_path):
     job = enqueue(queue, 100)
     with pytest.raises(ValueError, match="invalid job transition"):
         queue.transition(job["queue_id"], "completed")
+
+
+def takeover_pair(tmp_path, *, preemptible=True):
+    queue = JobQueue(tmp_path / "takeover.sqlite")
+    old = enqueue(queue, 100, queue_id="old", preemptible=preemptible)
+    queue.dispatch_once([receiver("only", 0, 1000)])
+    queue.transition(old["queue_id"], "running")
+    new = enqueue(queue, 100, queue_id="new")
+    return queue, old, new
+
+
+def test_successful_cooperative_takeover_and_audit_never_overlaps(tmp_path):
+    queue, old, new = takeover_pair(tmp_path)
+    operations = ActiveOperationRegistry()
+    observed = []
+    def stop(operation_id):
+        with queue._connect() as db:
+            observed.append(db.execute("SELECT owner FROM receiver_leases").fetchall())
+        queue.transition(operation_id, "preempted")
+        with queue._connect() as db:
+            observed.append(db.execute("SELECT owner FROM receiver_leases").fetchall())
+    operations.register("old", stop)
+    result = queue.request_receiver_takeover(new_queue_id="new", blocking_queue_id="old",
+        confirm_takeover=True, requested_by="operator@example", reason="urgent signal",
+        operations=operations, receivers=[receiver("only", 0, 1000)])
+    assert result["status"] == "assigned"
+    assert [[row[0] for row in snapshot] for snapshot in observed] == [["queue:old"], []]
+    with queue._connect() as db:
+        assert [row[0] for row in db.execute("SELECT owner FROM receiver_leases")] == ["queue:new"]
+    event = queue.events("new")[0]
+    assert event["actor"] == "operator@example"
+    assert event["detail"]["displaced_job_id"] == "old"
+
+
+def test_takeover_refuses_non_preemptible_and_requires_authorized_identity(tmp_path):
+    queue, old, new = takeover_pair(tmp_path, preemptible=False)
+    with pytest.raises(PermissionError, match="non_preemptible"):
+        queue.request_receiver_takeover(new_queue_id="new", blocking_queue_id="old",
+            confirm_takeover=True, requested_by="operator", reason="test",
+            receivers=[receiver("only", 0, 1000)])
+    queue.set_preemptible("old")
+    with pytest.raises(PermissionError, match="authorized"):
+        queue.request_receiver_takeover(new_queue_id="new", blocking_queue_id="old",
+            confirm_takeover=True, requested_by="", reason="test",
+            receivers=[receiver("only", 0, 1000)])
+
+
+def test_takeover_timeout_keeps_replacement_queued(tmp_path):
+    queue, old, new = takeover_pair(tmp_path)
+    operations = ActiveOperationRegistry(); operations.register("old", lambda _job_id: None)
+    result = queue.request_receiver_takeover(new_queue_id="new", blocking_queue_id="old",
+        confirm_takeover=True, requested_by="operator", reason="test", timeout=.01,
+        operations=operations, receivers=[receiver("only", 0, 1000)])
+    assert result["error"] == "takeover_timeout"
+    assert queue.get("new")["state"] == "queued"
+
+
+def test_replacement_cancellation_wins_race_while_stopping(tmp_path):
+    queue, old, new = takeover_pair(tmp_path)
+    operations = ActiveOperationRegistry()
+    def stop(operation_id):
+        queue.cancel("new")
+        queue.transition(operation_id, "completed")
+    operations.register("old", stop)
+    result = queue.request_receiver_takeover(new_queue_id="new", blocking_queue_id="old",
+        confirm_takeover=True, requested_by="operator", reason="test",
+        operations=operations, receivers=[receiver("only", 0, 1000)])
+    assert result["status"] == "replacement_cancelled"
+    assert queue.get("new")["state"] == "cancelled"
