@@ -9,12 +9,14 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 from uuid import uuid4
 
 from . import sdr_coordinator
+from .cooperative_cancellation import ACTIVE_OPERATIONS, ActiveOperationRegistry
 
 STATES = frozenset({"queued", "waiting_for_receiver", "starting", "running", "stopping",
                     "completed", "failed", "cancelled", "expired", "preempted"})
@@ -76,7 +78,18 @@ class JobQueue:
                 estimated_rf_duration_seconds REAL, state TEXT NOT NULL,
                 cancellation_requested INTEGER NOT NULL DEFAULT 0, assigned_receiver_id TEXT,
                 lease_id TEXT, started_at TEXT, ended_at TEXT, failure_reason TEXT,
-                blocking_reasons TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL)""")
+                blocking_reasons TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL,
+                preemptible INTEGER NOT NULL DEFAULT 0,
+                stop_capability TEXT NOT NULL DEFAULT 'cooperative')""")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(admission_jobs)")}
+            if "preemptible" not in columns:
+                db.execute("ALTER TABLE admission_jobs ADD COLUMN preemptible INTEGER NOT NULL DEFAULT 0")
+            if "stop_capability" not in columns:
+                db.execute("ALTER TABLE admission_jobs ADD COLUMN stop_capability TEXT NOT NULL DEFAULT 'cooperative'")
+            db.execute("""CREATE TABLE IF NOT EXISTS admission_job_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT, queue_id TEXT NOT NULL,
+                event_type TEXT NOT NULL, actor TEXT NOT NULL, detail TEXT NOT NULL,
+                created_at TEXT NOT NULL)""")
             db.execute("CREATE INDEX IF NOT EXISTS admission_jobs_state_priority ON admission_jobs(state, priority, created_at)")
 
     def _notify(self) -> None:
@@ -95,6 +108,7 @@ class JobQueue:
                     "required_backends", "blocking_reasons"):
             item[key] = json.loads(item[key])
         item["cancellation_requested"] = bool(item["cancellation_requested"])
+        item["preemptible"] = bool(item["preemptible"])
         return item
 
     def enqueue(self, *, operation_type: str, request_config: dict,
@@ -105,7 +119,7 @@ class JobQueue:
                 preferred_role: str | None = None, priority: int | None = None,
                 priority_class: str = "interactive", deadline: str | None = None,
                 estimated_rf_duration_seconds: float | None = None,
-                queue_id: str | None = None) -> dict:
+                queue_id: str | None = None, preemptible: bool = False) -> dict:
         if not operation_type.strip():
             raise ValueError("operation_type is required")
         if not isinstance(request_config, dict):
@@ -130,15 +144,113 @@ class JobQueue:
                   self._json(policy), self._json(ranges), bandwidth,
                   self._json(sorted(set(required_backends or []))), preferred_role,
                   int(DEFAULT_PRIORITIES[priority_class] if priority is None else priority),
-                  priority_class, now, deadline, estimated_rf_duration_seconds, "queued", now)
+                  priority_class, now, deadline, estimated_rf_duration_seconds, "queued", now,
+                  int(preemptible))
         with self._connect() as db:
             db.execute("""INSERT INTO admission_jobs
                 (queue_id,catalog_job_id,operation_type,request_config,receiver_policy,
                  required_tuning_ranges,required_bandwidth_hz,required_backends,preferred_role,
-                 priority,priority_class,created_at,deadline,estimated_rf_duration_seconds,state,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", values)
+                 priority,priority_class,created_at,deadline,estimated_rf_duration_seconds,state,updated_at,
+                 preemptible) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", values)
         self._notify()
         return self.get(queue_id)
+
+    def set_preemptible(self, queue_id: str, value: bool = True) -> dict:
+        with self._connect() as db:
+            db.execute("UPDATE admission_jobs SET preemptible=?,updated_at=? WHERE queue_id=?",
+                       (int(value), _utcnow().isoformat(), queue_id))
+            if not db.execute("SELECT changes()").fetchone()[0]:
+                raise KeyError(f"Unknown queued job: {queue_id}")
+        return self.get(queue_id)
+
+    def events(self, queue_id: str) -> list[dict]:
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM admission_job_events WHERE queue_id=? ORDER BY event_id",
+                              (queue_id,)).fetchall()
+        return [{**dict(row), "detail": json.loads(row["detail"])} for row in rows]
+
+    def request_receiver_takeover(self, *, new_queue_id: str, blocking_queue_id: str,
+                                  confirm_takeover: bool, requested_by: str, reason: str,
+                                  timeout: float = 10.0, cancel_on_timeout: bool = False,
+                                  operations: ActiveOperationRegistry | None = None,
+                                  receivers: list[dict] | None = None) -> dict:
+        """Cooperatively stop an owner, observe release, then atomically replace it."""
+        if not confirm_takeover:
+            raise ValueError("confirm_takeover=true is required")
+        if not requested_by.strip():
+            raise PermissionError("takeover requester is not authorized")
+        if not reason.strip():
+            raise ValueError("takeover reason is required")
+        registry = operations or ACTIVE_OPERATIONS
+        now = _utcnow().isoformat()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            new_row = db.execute("SELECT * FROM admission_jobs WHERE queue_id=?", (new_queue_id,)).fetchone()
+            old_row = db.execute("SELECT * FROM admission_jobs WHERE queue_id=?", (blocking_queue_id,)).fetchone()
+            if not new_row or not old_row:
+                raise KeyError("Unknown takeover job")
+            new, old = self._row(new_row), self._row(old_row)
+            if new["state"] not in {"queued", "waiting_for_receiver"}:
+                raise ValueError("replacement job is not queued")
+            if old["state"] not in {"starting", "running"} or not old["lease_id"]:
+                raise ValueError("blocking job does not own an active receiver")
+            if not old["preemptible"]:
+                raise PermissionError("blocking job is non_preemptible")
+            if old["stop_capability"] != "cooperative" or not registry.can_stop(blocking_queue_id):
+                raise RuntimeError("cooperative_stop_unavailable")
+            receiver_items = receivers if receivers is not None else sdr_coordinator._load()
+            receiver = next((r for r in receiver_items if r["receiver_id"] == old["assigned_receiver_id"]), None)
+            if receiver is None or not self._compatible(new, receiver):
+                raise ValueError("jobs do not conflict on the same compatible receiver")
+            lease = db.execute("SELECT owner FROM receiver_leases WHERE lease_id=? AND receiver_id=?",
+                               (old["lease_id"], old["assigned_receiver_id"])).fetchone()
+            if lease is None or lease["owner"] != f"queue:{blocking_queue_id}":
+                raise ValueError("blocking job lease ownership changed")
+            detail = self._json({"requested_by": requested_by, "reason": reason,
+                                 "displaced_job_id": blocking_queue_id,
+                                 "replacement_job_id": new_queue_id})
+            db.execute("UPDATE admission_jobs SET state='stopping',updated_at=? WHERE queue_id=?",
+                       (now, blocking_queue_id))
+            for queue_id in (blocking_queue_id, new_queue_id):
+                db.execute("INSERT INTO admission_job_events(queue_id,event_type,actor,detail,created_at) VALUES(?,?,?,?,?)",
+                           (queue_id, "takeover_requested", requested_by, detail, now))
+        self._notify()
+        registry.request_stop(blocking_queue_id, reason=reason)
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                replacement = db.execute("SELECT * FROM admission_jobs WHERE queue_id=?", (new_queue_id,)).fetchone()
+                lease = db.execute("SELECT 1 FROM receiver_leases WHERE receiver_id=?",
+                                   (old["assigned_receiver_id"],)).fetchone()
+                if replacement is None or replacement["state"] not in {"queued", "waiting_for_receiver"}:
+                    return {"status": "replacement_cancelled",
+                            "job": self._row(replacement) if replacement is not None else None}
+                if lease is None:
+                    assigned_at = _utcnow(); lease_id = f"lease-{uuid4().hex[:12]}"
+                    db.execute("INSERT INTO receiver_leases VALUES (?,?,?,?,?,?,?)",
+                               (lease_id, old["assigned_receiver_id"], f"queue:{new_queue_id}",
+                                replacement["operation_type"], assigned_at.isoformat(), assigned_at.isoformat(),
+                                (assigned_at + timedelta(seconds=self.lease_seconds)).isoformat()))
+                    changed = db.execute("""UPDATE admission_jobs SET state='starting',assigned_receiver_id=?,
+                        lease_id=?,blocking_reasons='[]',updated_at=? WHERE queue_id=?
+                        AND state IN ('queued','waiting_for_receiver')""",
+                        (old["assigned_receiver_id"], lease_id, assigned_at.isoformat(), new_queue_id)).rowcount
+                    if changed:
+                        db.execute("INSERT INTO admission_job_events(queue_id,event_type,actor,detail,created_at) VALUES(?,?,?,?,?)",
+                                   (new_queue_id, "takeover_assigned", requested_by, detail, assigned_at.isoformat()))
+                        self._notify()
+                        job = self._row(replacement)
+                        job.update(state="starting", assigned_receiver_id=old["assigned_receiver_id"],
+                                   lease_id=lease_id, blocking_reasons=[],
+                                   updated_at=assigned_at.isoformat())
+                        return {"status": "assigned", "job": job}
+            if time.monotonic() >= deadline:
+                if cancel_on_timeout:
+                    self.cancel(new_queue_id)
+                return {"status": "takeover_timeout", "error": "takeover_timeout",
+                        "job": self.get(new_queue_id)}
+            time.sleep(min(.025, max(0, deadline - time.monotonic())))
 
     def get(self, queue_id: str) -> dict:
         with self._connect() as db:

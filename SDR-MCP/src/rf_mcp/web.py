@@ -295,6 +295,7 @@ class RfWebApp:
 
         operations = {
             "/api/admission/jobs/cancel": self._cancel_admission_job,
+            "/api/admission/request_receiver_takeover": self._request_receiver_takeover,
             "/api/receivers/discover": self._discover_receivers,
             "/api/receivers/register": self._register_receiver,
             "/api/station-memories": self._create_station_memory,
@@ -693,6 +694,40 @@ body{{margin:0;background:#08111f;color:#e5edf8;font:16px system-ui;display:grid
         await self._operation(receive, send, allowed={"queue_id"},
                               callback=self.job_queue.cancel,
                               unavailable="job_queue_unavailable")
+
+    async def _request_receiver_takeover(self, receive: Callable, send: Callable) -> None:
+        """Authenticated, job-scoped takeover; no lease ID is accepted by this API."""
+        if self.job_queue is None:
+            await _response(send, 503, _json_bytes({"error": "job_queue_unavailable"}))
+            return
+        try:
+            body = await self._json_request(receive)
+            allowed = {"new_queue_id", "blocking_queue_id", "confirm_takeover", "reason",
+                       "timeout_seconds", "cancel_on_timeout"}
+            unknown = set(body) - allowed
+            if unknown:
+                raise ValueError(f"unknown parameters: {', '.join(sorted(unknown))}")
+            # Authentication has already been enforced at the routing boundary.  Use a
+            # non-secret stable audit identity for dashboard sessions/API callers.
+            actor = "authenticated_dashboard_user"
+            result = await asyncio.to_thread(
+                self.job_queue.request_receiver_takeover,
+                new_queue_id=str(body.get("new_queue_id", "")),
+                blocking_queue_id=str(body.get("blocking_queue_id", "")),
+                confirm_takeover=body.get("confirm_takeover") is True,
+                requested_by=actor, reason=str(body.get("reason", ""))[:1000],
+                timeout=float(body.get("timeout_seconds", 10)),
+                cancel_on_timeout=body.get("cancel_on_timeout") is True)
+            status = 409 if result.get("status") == "takeover_timeout" else 200
+            await _response(send, status, _json_bytes(result))
+        except PermissionError as exc:
+            await _response(send, 403, _json_bytes({"error": "takeover_refused", "detail": str(exc)}))
+        except KeyError as exc:
+            await _response(send, 404, _json_bytes({"error": "job_not_found", "detail": str(exc)}))
+        except (TypeError, ValueError) as exc:
+            await _response(send, 400, _json_bytes({"error": "invalid_takeover", "detail": str(exc)}))
+        except RuntimeError as exc:
+            await _response(send, 409, _json_bytes({"error": str(exc)}))
 
     async def _json_request(self, receive: Callable) -> dict:
         body = bytearray()
