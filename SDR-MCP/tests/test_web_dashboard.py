@@ -152,10 +152,10 @@ def test_dashboard_navigation_restores_history_and_active_semantics():
     assert "setAttribute('aria-current','page')" in script
     assert "removeAttribute('aria-current')" in script
     assert "document.title=`${viewTitles[id]} · MiniRackDisplay`" in script
-    assert "history.pushState({view:id}" in script
+    assert "history.pushState({view:id,resultId}" in script
     assert "window.addEventListener('popstate',restoreHashView)" in script
     assert "window.addEventListener('hashchange',restoreHashView)" in script
-    assert "showView(location.hash.slice(1)||'home',{updateHistory:false})" in script
+    assert "showView(view||'home',{updateHistory:false,resultId:" in script
     assert "heading.focus()" in script
     for legacy_hash in ("listen", "scan", "system"):
         assert f"'{legacy_hash}'" in script
@@ -171,7 +171,7 @@ def test_dashboard_exposes_accessible_status_and_progress_semantics():
     assert "region.setAttribute('aria-live','polite')" in script
     assert "status.setAttribute('aria-live','polite')" in script
     assert "document.createElement('progress')" in script
-    assert "track.max=100;track.value=pct" in script
+    assert "track.max=100;track.value=job.progress" in script
     assert "progress.max=100;progress.value=pct" in script
     assert "setAttribute('aria-label',jobLabel" in script
 
@@ -206,9 +206,9 @@ def test_dashboard_javascript_routes_jobs_and_artifacts_to_workspaces():
     assert "fm:['fm_broadcast_survey']" in script
     assert "sstv:['sstv_decode','sstv_watch']" in script
     assert "digital:['weak_signal_decode','fldigi_decode','digital_decode']" in script
-    assert "jobTypes.includes(j.job_type)" in script
-    assert "const job=jobs.get(a.job_id)" in script
-    assert "job&&jobTypes.includes(job.job_type)" in script
+    assert "jobTypes.includes(j.type)" in script
+    assert "artifactsByJob.get(raw.job_id)" in script
+    assert "job.artifacts.filter" in script
     assert "renderOperationWorkspace(d,view,jobTypes" in script
     # Home deliberately invokes both renderers without a type filter.
     assert "renderJobProgressCards(d);renderResultCards(d);renderContextualWorkspaces(d)" in script
@@ -921,3 +921,53 @@ def test_confirmed_actions_preserve_exact_api_requests():
 
     # Low-severity acknowledgement remains immediate and idempotent.
     assert b"postOperation('/api/alerts/acknowledge',{event_id:e.alert.event_id})" in script
+
+
+def test_dashboard_uses_one_accessible_job_presentation_lifecycle():
+    script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(encoding="utf-8")
+
+    assert "function dashboardJobs(d)" in script
+    for field in ("id:raw.job_id", "label:jobLabels", "view:jobViews", "state,phase:",
+                  "progress,timing:", "stoppable:", "error:raw.error", "artifacts:artifactsByJob"):
+        assert field in script
+    assert "activeJobStates=new Set(['queued','running','stopping'])" in script
+    assert "terminalJobStates=new Set(['completed','failed','stopped','cancelled','interrupted'])" in script
+    for label in ("'Status'", "'Stop'", "'Resume'", "'Open'", "'View results'"):
+        assert label in script
+    assert "dashboardJobs(d).filter" in script
+
+
+def test_job_start_and_stop_status_are_accessible_and_persistent():
+    script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(encoding="utf-8")
+
+    assert "jobAnnouncement.setAttribute('aria-live','polite')" in script
+    assert "Job ID ${id}" in script
+    assert "announceStarted('scan',result" in script
+    assert "announceStarted('fm',result" in script
+    assert "announceStarted('sstv',result" in script
+    assert "workspace.scrollIntoView({block:'start'})" in script
+    assert "pendingStops.add(job.job_id)" in script
+    assert "pendingStops.has(raw.job_id)&&!terminalJobStates.has(raw.state)?'stopping'" in script
+    assert "if(terminalJobStates.has(raw.state))pendingStops.delete(raw.job_id)" in script
+
+
+def test_completed_jobs_navigate_to_their_originating_result_card():
+    script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(encoding="utf-8")
+
+    assert "showView(job.view,{resultId:job.id})" in script
+    assert "card.dataset.resultJob=job.id" in script
+    assert "?result='+encodeURIComponent(resultId)" in script
+    assert "new URLSearchParams(query).get('result')" in script
+    assert "CSS.escape(resultId)" in script
+    assert "result.scrollIntoView({block:'center'})" in script
+    assert "result.focus()" in script
+    assert "history.pushState({view:id,resultId}" in script
+
+
+def test_receiver_owner_disables_duplicate_starts_with_local_context():
+    script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(encoding="utf-8")
+
+    assert "#bandStartButton,#fmSurveyButton,#sstvStart" in script
+    assert "button.disabled=Boolean(active)" in script
+    assert "Receiver occupied by ${owner}" in script
+    assert "workspace.querySelector('.receiver-owner')" in script
