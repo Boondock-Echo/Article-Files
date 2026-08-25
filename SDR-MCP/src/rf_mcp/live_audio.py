@@ -20,7 +20,7 @@ from typing import Iterator
 from uuid import uuid4
 
 import numpy as np
-from scipy.signal import butter, sosfilt
+from scipy.signal import butter, lfilter, sosfilt
 
 from . import config, receiver_backend
 from .live_iq import LiveIQManager
@@ -117,10 +117,12 @@ class StreamingDemodulator:
         self.audio_sos = butter(6, min(15_000, intermediate_rate * .4), btype="lowpass", fs=intermediate_rate, output="sos")
         self.audio_zi = np.zeros((self.audio_sos.shape[0], 2))
         a = math.exp(-1 / (intermediate_rate * settings.deemphasis_us * 1e-6))
-        self.deemphasis_a, self.deemphasis_value = a, 0.0
+        self.deemphasis_a = a
+        # lfilter's delay state for y[n] = (1-a)x[n] + a*y[n-1].
+        self.deemphasis_zi = np.zeros(1)
         self.agc_gain = 1.0
         self.agc_envelope = 1e-3
-        self.pending = np.empty(0, dtype=np.int16)
+        self.pending_audio = np.empty(0)
 
     def _demodulate(self, iq: np.ndarray) -> np.ndarray:
         mode = self.settings.mode
@@ -151,26 +153,28 @@ class StreamingDemodulator:
         audio = self.resampler.process(self._demodulate(filtered))
         audio, self.audio_zi = sosfilt(self.audio_sos, audio, zi=self.audio_zi)
         if self.settings.mode == "broadcast_fm":
-            out = np.empty_like(audio)
-            for i, value in enumerate(audio):
-                self.deemphasis_value = (1-self.deemphasis_a)*value + self.deemphasis_a*self.deemphasis_value
-                out[i] = self.deemphasis_value
+            out, self.deemphasis_zi = lfilter(
+                [1.0 - self.deemphasis_a], [1.0, -self.deemphasis_a], audio,
+                zi=self.deemphasis_zi,
+            )
             audio = self.output_resampler.process(out)
-        # Slow RMS AGC and a hard soft-knee limiter replace per-recording peak scaling.
-        conditioned = np.empty_like(audio)
-        for index, value in enumerate(audio):
-            # Sample-wise attack/release makes gain independent of backend chunking.
-            coefficient = .999 if abs(value) > self.agc_envelope else .99995
-            self.agc_envelope = coefficient*self.agc_envelope + (1-coefficient)*abs(value)
-            target = min(50.0, .20 / max(self.agc_envelope, 1e-6))
-            self.agc_gain = .9999*self.agc_gain + .0001*target
-            conditioned[index] = value*self.agc_gain
-        pcm = np.round(np.tanh(conditioned * 1.5) * 32767).astype("<i2")
-        self.pending = np.concatenate((self.pending, pcm))
+        # Condition fixed Opus-sized blocks so vector processing is independent
+        # of receiver chunk boundaries.  Attack/release and gain remain stateful.
+        self.pending_audio = np.concatenate((self.pending_audio, audio))
         frame_samples, frames = 960, []  # 20 ms Opus frames at 48 kHz
-        while self.pending.size >= frame_samples:
-            frames.append(self.pending[:frame_samples].tobytes())
-            self.pending = self.pending[frame_samples:]
+        while self.pending_audio.size >= frame_samples:
+            block = self.pending_audio[:frame_samples]
+            self.pending_audio = self.pending_audio[frame_samples:]
+            peak = float(np.max(np.abs(block), initial=0.0))
+            envelope_coefficient = .999 if peak > self.agc_envelope else .99995
+            decay = envelope_coefficient ** frame_samples
+            self.agc_envelope = decay*self.agc_envelope + (1-decay)*peak
+            target = min(50.0, .20 / max(self.agc_envelope, 1e-6))
+            powers = np.power(.9999, np.arange(1, frame_samples + 1))
+            gains = target + (self.agc_gain-target)*powers
+            self.agc_gain = float(gains[-1])
+            pcm = np.round(np.tanh(block*gains*1.5)*32767).astype("<i2")
+            frames.append(pcm.tobytes())
         return frames
 
 
@@ -182,7 +186,8 @@ class OpusEncoder:
     def __init__(self):
         self.process = subprocess.Popen([config.LIVE_AUDIO_FFMPEG, "-hide_banner", "-loglevel", "warning",
             "-f", "s16le", "-ar", "48000", "-ac", "1", "-i", "pipe:0", "-c:a", "libopus",
-            "-application", "lowdelay", "-f", "ogg", "pipe:1"], stdin=subprocess.PIPE,
+            "-application", "lowdelay", "-frame_duration", "20", "-flush_packets", "1",
+            "-page_duration", "20000", "-f", "ogg", "pipe:1"], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
         self.stderr = deque(maxlen=16)
         threading.Thread(target=self._drain_error, daemon=True).start()
@@ -196,8 +201,23 @@ class OpusEncoder:
         self.process.stdin.write(pcm)
 
     def chunks(self) -> Iterator[bytes]:
+        """Yield each complete Ogg page as soon as stdout makes it available."""
         assert self.process.stdout
-        while chunk := self.process.stdout.read(4096): yield chunk
+        def read_exact(size):
+            parts = []
+            while size:
+                part = self.process.stdout.read(size)
+                if not part: return b"".join(parts)
+                parts.append(part); size -= len(part)
+            return b"".join(parts)
+        while header := read_exact(27):
+            if len(header) != 27 or header[:4] != b"OggS":
+                raise RuntimeError("encoder returned a truncated or invalid Ogg page")
+            segments = read_exact(header[26])
+            if len(segments) != header[26]: raise RuntimeError("encoder truncated the Ogg segment table")
+            body = read_exact(sum(segments))
+            if len(body) != sum(segments): raise RuntimeError("encoder truncated an Ogg page")
+            yield header + segments + body
 
     def close(self):
         if self.process.stdin and not self.process.stdin.closed: self.process.stdin.close()
@@ -206,6 +226,9 @@ class OpusEncoder:
             self.process.terminate()
             try: self.process.wait(timeout=2)
             except subprocess.TimeoutExpired: self.process.kill()
+        finally:
+            for pipe in (self.process.stdin, self.process.stdout, self.process.stderr):
+                if pipe is not None and not pipe.closed: pipe.close()
 
 
 @dataclass
@@ -226,6 +249,7 @@ class _Session:
     stop_requested_monotonic: float | None = None
     stopped_monotonic: float | None = None
     queue_drops: int = 0
+    discarded_pcm_frames: int = 0
     encoder_output_error: str | None = None
     def public(self):
         result = asdict(self); result["state"] = self.state.value; result["config"] = asdict(self.config)
@@ -298,13 +322,46 @@ class LiveAudioManager:
             session.error = session.encoder_output_error
             stop.set()
 
+    def _write_encoder(self, session, encoder, stop, pcm_queue):
+        """Keep a stalled encoder off the IQ/DSP producer thread."""
+        try:
+            while True:
+                pcm = pcm_queue.get()
+                if pcm is None: break
+                encoder.write(pcm)
+        except Exception as exc:
+            session.error = f"{type(exc).__name__}: {str(exc)[:240]}"
+            stop.set()
+        finally:
+            process = getattr(encoder, "process", None)
+            stdin = getattr(process, "stdin", None)
+            if stdin is not None and not stdin.closed:
+                try: stdin.close()
+                except OSError: pass
+
+    @staticmethod
+    def _finish_pcm_queue(pcm_queue):
+        """Put the terminal marker at the live edge without ever blocking."""
+        while True:
+            try:
+                pcm_queue.put_nowait(None)
+                return
+            except queue.Full:
+                try: pcm_queue.get_nowait()
+                except queue.Empty: pass
+
     def _produce(self, session, stop, iq_subscription):
-        encoder = None
+        encoder = None; reader = None; writer = None
+        pcm_queue = queue.Queue(maxsize=config.LIVE_AUDIO_PCM_QUEUE_FRAMES)
         try:
             encoder = self.encoder_factory(); sample_rate = receiver_backend.SAMPLE_RATE
             dsp = StreamingDemodulator(session.config, sample_rate)
-            threading.Thread(target=self._read_encoder, args=(session, encoder, stop), daemon=True,
-                             name=f"live-audio-encoder-{session.receiver_id}").start()
+            reader = threading.Thread(target=self._read_encoder, args=(session, encoder, stop), daemon=True,
+                                      name=f"live-audio-encoder-reader-{session.receiver_id}")
+            writer = threading.Thread(target=self._write_encoder,
+                                      args=(session, encoder, stop, pcm_queue), daemon=True,
+                                      name=f"live-audio-encoder-writer-{session.receiver_id}")
+            reader.start(); writer.start()
             session.state, session.started_at = LiveAudioState.STREAMING, _now()
             deadline = time.monotonic() + session.config.maximum_duration_seconds
             while not stop.is_set() and time.monotonic() < deadline:
@@ -316,17 +373,34 @@ class LiveAudioManager:
                 if session.first_iq_monotonic is None: session.first_iq_monotonic = time.monotonic()
                 for pcm in dsp.process(iq):
                     if session.first_pcm_monotonic is None: session.first_pcm_monotonic = time.monotonic()
-                    encoder.write(pcm)
+                    if pcm_queue.full():
+                        try:
+                            pcm_queue.get_nowait(); session.discarded_pcm_frames += 1
+                        except queue.Empty: pass
+                    try: pcm_queue.put_nowait(pcm)
+                    except queue.Full: session.discarded_pcm_frames += 1
             if session.encoder_output_error: raise RuntimeError(session.encoder_output_error)
             session.termination_reason = "stopped" if stop.is_set() else "duration_limit"
-            session.state = LiveAudioState.COMPLETED
         except Exception as exc:
             session.state, session.termination_reason = LiveAudioState.FAILED, "error"
             session.error = f"{type(exc).__name__}: {str(exc)[:240]}"
         finally:
             stop.set()
             if iq_subscription is not None: iq_subscription.close()
-            if encoder is not None: encoder.close()
+            self._finish_pcm_queue(pcm_queue)
+            if writer is not None: writer.join(timeout=1)
+            if encoder is not None:
+                try: encoder.close()
+                except Exception as exc:
+                    session.error = f"{type(exc).__name__}: {str(exc)[:240]}"
+            if reader is not None: reader.join(timeout=1)
+            workers = [worker for worker in (writer, reader) if worker is not None and worker.is_alive()]
+            if workers and session.error is None:
+                session.error = "encoder worker did not stop cleanly"
+            if session.error:
+                session.state, session.termination_reason = LiveAudioState.FAILED, "error"
+            else:
+                session.state = LiveAudioState.COMPLETED
             session.stopped_monotonic = time.monotonic()
             session.ended_at = _now(); self._broadcast(session, None)
             with self._lock: self._history.append(session.public())

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import numpy as np
+import io
 import queue
 import threading
+import time
 
 from rf_mcp.live_audio import (LiveAudioConfig, LiveAudioManager, LiveAudioState,
-                               StreamingDemodulator, _Session, complex_iq)
+                               OpusEncoder, StreamingDemodulator, _Session, complex_iq)
 
 
 def _settings(mode="nfm"):
@@ -32,6 +34,25 @@ def test_fm_discriminator_and_resampler_are_continuous(monkeypatch):
         pieces.extend(split.process(iq[start:boundary]))
         start = boundary
     assert b"".join(pieces) == reference
+
+
+def test_broadcast_fm_deemphasis_and_agc_are_continuous(monkeypatch):
+    monkeypatch.setattr(LiveAudioConfig, "validated", lambda self: self)
+    rate = 192_000
+    phase = 2*np.pi*5_000*np.arange(40_000)/rate
+    iq = np.exp(1j*(phase + .2*np.sin(2*np.pi*700*np.arange(40_000)/rate))).astype(np.complex64)
+    whole = StreamingDemodulator(_settings("broadcast_fm"), rate)
+    split = StreamingDemodulator(_settings("broadcast_fm"), rate)
+    expected = b"".join(whole.process(iq))
+    actual = b"".join(sum((split.process(part) for part in np.array_split(iq, 17)), []))
+    assert actual == expected
+
+
+def test_opus_encoder_yields_complete_pages_without_read_ahead():
+    page = b"OggS" + bytes(22) + b"\x02" + bytes((3, 2)) + b"abcde"
+    encoder = OpusEncoder.__new__(OpusEncoder)
+    encoder.process = type("Process", (), {"stdout": io.BytesIO(page + page)})()
+    assert list(encoder.chunks()) == [page, page]
 
 
 def test_pcm_frames_are_fixed_48khz_mono_int16(monkeypatch):
@@ -88,3 +109,49 @@ def test_public_startup_and_stop_metrics_are_ordered():
     assert public["first_iq_monotonic"] < public["first_pcm_monotonic"] < public["first_encoded_chunk_monotonic"]
     assert public["queue_drops"] == 3
     assert public["time_to_stop_ms"] == 25
+
+
+def test_slow_encoder_is_bounded_emits_first_output_and_cleans_up(monkeypatch):
+    monkeypatch.setattr(LiveAudioConfig, "validated", lambda self: self)
+    monkeypatch.setattr("rf_mcp.receiver_backend.resolve_receiver",
+                        lambda _id: ({"receiver_id": "slow"}, None))
+    monkeypatch.setattr("rf_mcp.receiver_backend.SAMPLE_RATE", 192_000)
+    monkeypatch.setattr("rf_mcp.config.LIVE_AUDIO_PCM_QUEUE_FRAMES", 2)
+
+    class IQSubscription:
+        def __init__(self): self.chunks, self.closed = queue.Queue(), threading.Event()
+        error = None
+        def close(self): self.closed.set()
+    class IQManager:
+        def __init__(self): self.subscription = IQSubscription()
+        def subscribe(self, *_args): return self.subscription
+        def shutdown(self): pass
+    class SlowEncoder:
+        instances = []
+        @staticmethod
+        def available(): return True
+        def __init__(self):
+            self.output = queue.Queue(); self.closed = False; self.__class__.instances.append(self)
+        def write(self, _pcm):
+            time.sleep(.03)
+            if self.output.empty(): self.output.put(b"OggS-first")
+        def chunks(self):
+            while (chunk := self.output.get()) is not None: yield chunk
+        def close(self): self.closed = True; self.output.put(None)
+
+    iq = IQManager(); manager = LiveAudioManager(SlowEncoder, iq)
+    subscription = manager.subscribe(_settings("am"))
+    samples = np.ones(20_000, dtype=np.complex64)
+    for _ in range(12): iq.subscription.chunks.put(samples)
+    assert subscription.frames.get(timeout=2) == b"OggS-first"
+    iq.subscription.chunks.put(None)
+    assert iq.subscription.closed.wait(2)
+    deadline = time.monotonic() + 2
+    while manager.status()["sessions"][0]["state"] not in ("completed", "failed") and time.monotonic() < deadline:
+        time.sleep(.01)
+    status = manager.status()["sessions"][0]
+    assert status["discarded_pcm_frames"] > 0
+    assert SlowEncoder.instances[0].closed
+    assert not any(t.name.startswith("live-audio-encoder-") and t.is_alive()
+                   for t in threading.enumerate())
+    subscription.close()
