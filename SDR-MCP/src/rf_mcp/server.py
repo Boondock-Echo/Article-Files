@@ -230,6 +230,22 @@ class _LazyLiveAudioManager:
 
 live_audio_manager = _LazyLiveAudioManager()
 
+class _LazyLiveWaterfallManager:
+    _manager = None
+    def _get(self):
+        if self._manager is None:
+            from .live_waterfall import LiveWaterfallManager
+            self._manager = LiveWaterfallManager()
+        return self._manager
+    def status(self): return self._get().status()
+    def stop(self, session_id=None): return self._get().stop(session_id)
+    def subscribe(self, settings): return self._get().subscribe(settings)
+    def shutdown(self):
+        if self._manager is not None: self._manager.shutdown()
+
+
+live_waterfall_manager = _LazyLiveWaterfallManager()
+
 
 @mcp.tool()
 def get_rf_api_contract() -> dict:
@@ -664,6 +680,7 @@ def get_rf_recovery_status() -> dict:
         catalog=catalog, receivers=receiver_service,
         spectrum_capture=inspect_spectrum, signal_analyzer=analyze_signal,
         broadcast_fm_receiver=receive_broadcast_fm, live_audio=live_audio_manager,
+        live_waterfall=live_waterfall_manager,
     )
     return services.recovery_status(_INTERRUPTED_JOBS_ON_STARTUP)
 
@@ -4309,7 +4326,8 @@ def main() -> None:
                        spectrum_capture=inspect_spectrum,
                        signal_analyzer=analyze_signal,
                        broadcast_fm_receiver=receive_broadcast_fm,
-                       live_audio=live_audio_manager)
+                       live_audio=live_audio_manager,
+                       live_waterfall=live_waterfall_manager)
         app = RfWebApp(mcp.streamable_http_app(), catalog, token, __version__,
                        inspect_spectrum, analyze_signal, receive_broadcast_fm,
                        save_rf_schedule, run_rf_schedule_now, set_rf_schedule_enabled,
@@ -4336,6 +4354,7 @@ def main() -> None:
         )
     finally:
         live_audio_manager.shutdown()
+        live_waterfall_manager.shutdown()
         satellite_scheduler.stop()
         scheduler_manager.stop()
         webhook_dispatcher.stop()

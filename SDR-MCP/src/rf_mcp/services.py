@@ -38,6 +38,7 @@ class RfApplicationServices:
     signal_analyzer: Callable
     broadcast_fm_receiver: Callable
     live_audio: Any | None = None
+    live_waterfall: Any | None = None
 
     def recovery_status(self, interrupted_jobs_on_startup: int) -> dict:
         return {
