@@ -15,6 +15,7 @@ import numpy as np
 
 from . import config, receiver_backend
 from .live_iq import LiveIQManager
+from .sdr_coordinator import plan_assignment
 
 
 class LiveWaterfallState(StrEnum):
@@ -50,7 +51,10 @@ class LiveWaterfallConfig:
     maximum_duration_seconds: float = 300.0
 
     def validated(self) -> "LiveWaterfallConfig":
-        receiver_backend.validate_frequency(self.center_frequency_hz, self.receiver_id)
+        # ``auto`` is an assignment policy, not a receiver registry ID. The
+        # concrete receiver is selected immediately before opening shared IQ.
+        if self.receiver_id != "auto":
+            receiver_backend.validate_frequency(self.center_frequency_hz, self.receiver_id)
         if self.fft_size < 256 or self.fft_size > 65536 or self.fft_size & (self.fft_size - 1):
             raise ValueError("fft_size must be a power of two from 256 through 65536")
         if not .5 <= self.update_rate_hz <= 30:
@@ -132,7 +136,20 @@ class LiveWaterfallManager:
         self.iq_manager = iq_manager or LiveIQManager()
 
     def subscribe(self, requested: LiveWaterfallConfig) -> WaterfallSubscription:
-        cfg = requested.validated(); receiver, _ = receiver_backend.resolve_receiver(cfg.receiver_id); rid = receiver["receiver_id"]
+        cfg = requested.validated()
+        if cfg.receiver_id == "auto":
+            assignment = plan_assignment(
+                frequency_hz=cfg.center_frequency_hz,
+                required_bandwidth_hz=cfg.span_hz,
+                receiver_id="auto",
+                implemented_backends=set(receiver_backend.registered_backends()),
+            )
+            if assignment["selected"] is None:
+                raise RuntimeError("Automatic receiver assignment failed: no compatible idle receiver")
+            rid = assignment["selected"]["receiver_id"]
+        else:
+            receiver, _ = receiver_backend.resolve_receiver(cfg.receiver_id)
+            rid = receiver["receiver_id"]
         with self._lock:
             active = next((s for s in self._sessions.values() if s.receiver_id == rid and
                            s.config == cfg and s.state in
