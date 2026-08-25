@@ -169,6 +169,23 @@ def test_dashboard_coordinator_uses_active_and_idle_intervals():
     assert "['queued','running','stopping'].includes(job.state)" in script
 
 
+def test_dashboard_sync_status_is_accessible_and_visibility_aware():
+    assets = resources.files("rf_mcp").joinpath("assets")
+    script = assets.joinpath("dashboard.js").read_text(encoding="utf-8")
+    stylesheet = assets.joinpath("dashboard.css").read_text(encoding="utf-8")
+
+    assert 'id="syncStatusText" aria-hidden="true">Updated just now' in script
+    assert 'id="syncAnnouncement" class="sr-only" role="status" aria-live="polite" aria-atomic="true"' in script
+    assert 'id="syncRefresh" type="button">Refresh now' in script
+    assert "Date.parse(snapshot.generated_at)" in script
+    assert "(stale?'Stale · ':'')+dashboardRelativeAge()" in script
+    assert "document.visibilityState==='hidden'" in script
+    assert "document.addEventListener('visibilitychange'" in script
+    assert "dashboardMissedRefreshes>1?'error':stale?'warning':'current'" in script
+    assert '.sync-status[data-state="warning"]' in stylesheet
+    assert '.sync-status[data-state="error"]' in stylesheet
+
+
 def test_dashboard_navigation_is_grouped_and_accessible():
     assets = resources.files("rf_mcp").joinpath("assets")
     script = assets.joinpath("dashboard.js").read_text(encoding="utf-8")
