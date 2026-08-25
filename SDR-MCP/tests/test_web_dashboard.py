@@ -129,6 +129,30 @@ def test_dashboard_assets_are_packaged_and_have_stable_landmarks():
     assert "uxStyle" not in script
 
 
+def test_dashboard_uses_centralized_semantic_timestamp_formatting():
+    script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "new Intl.DateTimeFormat" in script
+    assert "new Intl.RelativeTimeFormat" in script
+    assert "function renderTimestamp" in script
+    assert "function timestampCell" in script
+    assert "const date=new Date(value)" in script
+    assert "time.dateTime=exact" in script
+    assert "time.title=complete" in script
+    assert "time.tabIndex=0" in script
+    assert "time.setAttribute('aria-label',complete)" in script
+    assert "replace('T',' ').slice(0,19)" not in script
+
+    # Every API-backed operational timestamp renderer delegates to the helper.
+    for timestamp in (
+        "s.observed_at", "s.next_run_at", "e.time", "j.created_at",
+        "s.last_seen_at", "s.captured_at", "x.captured_at",
+    ):
+        assert f"renderTimestamp({timestamp}" in script or f"timestampCell({timestamp}" in script
+
+
 def test_dashboard_has_one_coordinated_polling_owner():
     script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
         encoding="utf-8"
