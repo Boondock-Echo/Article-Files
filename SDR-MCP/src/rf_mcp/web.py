@@ -514,6 +514,11 @@ class RfWebApp:
         await send({"type": "http.response.start", "status": 200, "headers": [
             (b"content-type", b"application/x-ndjson; charset=utf-8"), (b"cache-control", b"no-store"),
             (b"x-content-type-options", b"nosniff"), (b"x-accel-buffering", b"no")]})
+        # Uvicorn does not put the response headers on the wire until it sees the
+        # first body event.  A receiver can take a while to deliver its first IQ
+        # block, so flush a harmless blank NDJSON line immediately; otherwise the
+        # browser's fetch() remains pending and the dashboard stays on Connecting.
+        await send({"type": "http.response.body", "body": b"\n", "more_body": True})
         try:
             while True:
                 row_task = asyncio.create_task(asyncio.to_thread(subscription.rows.get))
@@ -524,9 +529,7 @@ class RfWebApp:
                 if row_task not in done: continue
                 frame = row_task.result()
                 if frame is None: break
-                # NDJSON records must be newline-delimited.  Without the delimiter the
-                # dashboard keeps every row in its pending buffer and never renders it.
-                await send({"type": "http.response.body", "body": _json_bytes(frame) + b"\n", "more_body": True})
+                await send({"type": "http.response.body", "body": _json_bytes(frame), "more_body": True})
         finally:
             subscription.close()
         await send({"type": "http.response.body", "body": b"", "more_body": False})
