@@ -38,6 +38,14 @@ def release_readiness(catalog: Catalog, *, probe_hardware: bool = False) -> dict
     add("receiver_cli", bool(installed_capture),
         ", ".join(installed_capture) if installed_capture else "no supported receiver CLI detected",
         required=False)
+    live = {"available": shutil.which(os.getenv("RF_MCP_LIVE_FFMPEG", "ffmpeg")) is not None,
+            "iq_streaming": True, "modes": ["broadcast_fm", "am", "nfm", "usb", "lsb", "cw"],
+            "codecs": ["ogg/opus"], "sample_rate_hz": 48000, "channels": 1,
+            "broadcast_fm": "mono; stereo requires a continuous pilot PLL",
+            "artifacts_created": False}
+    add("live_audio_encoder", live["available"],
+        "Ogg/Opus via FFmpeg" if live["available"] else "FFmpeg with libopus not found",
+        required=False)
     required_failures = [item for item in checks if item["required"] and not item["passed"]]
     warnings = [item for item in checks if not item["required"] and not item["passed"]]
     return {
@@ -46,4 +54,5 @@ def release_readiness(catalog: Catalog, *, probe_hardware: bool = False) -> dict
                   ("ready_with_warnings" if not required_failures else "not_ready"),
         "checks": checks, "required_failure_count": len(required_failures),
         "warning_count": len(warnings), "probe_hardware": bool(probe_hardware),
+        "live_audio": live,
     }

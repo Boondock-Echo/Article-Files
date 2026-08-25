@@ -212,6 +212,25 @@ _INTERRUPTED_JOBS_ON_STARTUP = catalog.mark_interrupted_jobs()
 receiver_service = ReceiverService()
 
 
+class _LazyLiveAudioManager:
+    """Keep scipy out of the lightweight MCP import/readiness path."""
+    _manager = None
+    def _get(self):
+        if self._manager is None:
+            from .live_audio import LiveAudioManager
+            self._manager = LiveAudioManager()
+        return self._manager
+    def capabilities(self): return self._get().capabilities()
+    def status(self): return self._get().status()
+    def stop(self, session_id=None): return self._get().stop(session_id)
+    def subscribe(self, settings): return self._get().subscribe(settings)
+    def shutdown(self):
+        if self._manager is not None: self._manager.shutdown()
+
+
+live_audio_manager = _LazyLiveAudioManager()
+
+
 @mcp.tool()
 def get_rf_api_contract() -> dict:
     """Return the stable v1 tool, units, measurement, and compatibility contract."""
@@ -621,12 +640,30 @@ def get_sdr_coordinator_status() -> dict:
 
 
 @mcp.tool()
+def get_live_audio_capabilities() -> dict:
+    """Describe the authenticated HTTP live-media channel (MCP carries no audio)."""
+    return live_audio_manager.capabilities()
+
+
+@mcp.tool()
+def list_live_audio_sessions() -> dict:
+    """List sanitized live session metadata; no tokens, client identities, IQ or audio."""
+    return live_audio_manager.status()
+
+
+@mcp.tool()
+def stop_live_audio_session(session_id: str) -> dict:
+    """Stop a live session; listeners consume media through GET /api/live-audio."""
+    return live_audio_manager.stop(session_id)
+
+
+@mcp.tool()
 def get_rf_recovery_status() -> dict:
     """Report durable schema, lease, and restart-recovery status without using RF hardware."""
     services = RfApplicationServices(
         catalog=catalog, receivers=receiver_service,
         spectrum_capture=inspect_spectrum, signal_analyzer=analyze_signal,
-        broadcast_fm_receiver=receive_broadcast_fm,
+        broadcast_fm_receiver=receive_broadcast_fm, live_audio=live_audio_manager,
     )
     return services.recovery_status(_INTERRUPTED_JOBS_ON_STARTUP)
 
@@ -4271,7 +4308,8 @@ def main() -> None:
                        catalog=catalog, receivers=receiver_service,
                        spectrum_capture=inspect_spectrum,
                        signal_analyzer=analyze_signal,
-                       broadcast_fm_receiver=receive_broadcast_fm)
+                       broadcast_fm_receiver=receive_broadcast_fm,
+                       live_audio=live_audio_manager)
         app = RfWebApp(mcp.streamable_http_app(), catalog, token, __version__,
                        inspect_spectrum, analyze_signal, receive_broadcast_fm,
                        save_rf_schedule, run_rf_schedule_now, set_rf_schedule_enabled,
@@ -4297,6 +4335,7 @@ def main() -> None:
             port=int(os.getenv("RF_MCP_PORT", "8765")),
         )
     finally:
+        live_audio_manager.shutdown()
         satellite_scheduler.stop()
         scheduler_manager.stop()
         webhook_dispatcher.stop()

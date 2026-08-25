@@ -160,6 +160,7 @@ class RfWebApp:
             self.spectrum_capture = services.spectrum_capture
             self.signal_analyzer = services.signal_analyzer
             self.broadcast_fm_receiver = services.broadcast_fm_receiver
+        self.live_audio = services.live_audio if services is not None else None
         self._sessions: dict[str, float] = {}
         self._dashboard_assets: tuple[bytes, bytes, bytes] | None = None
 
@@ -308,6 +309,33 @@ class RfWebApp:
                 await self._broadcast_fm(receive, send)
             return
 
+        if path == "/api/live-audio" and scope.get("method") == "GET":
+            if not self._dashboard_authorized(scope):
+                await _response(send, 401, _json_bytes({"error": "unauthorized"}),
+                                extra_headers=[(b"www-authenticate", b"Bearer")])
+            else:
+                await self._live_audio_stream(scope, receive, send)
+            return
+
+        if path == "/api/live-audio/status" and scope.get("method") == "GET":
+            if not self._dashboard_authorized(scope):
+                await _response(send, 401, _json_bytes({"error": "unauthorized"}))
+            elif self.live_audio is None:
+                await _response(send, 503, _json_bytes({"error": "live_audio_unavailable"}))
+            else:
+                await _response(send, 200, _json_bytes(self.live_audio.status()))
+            return
+
+        if path == "/api/live-audio/stop" and scope.get("method") == "POST":
+            if not self._dashboard_authorized(scope):
+                await _response(send, 401, _json_bytes({"error": "unauthorized"}))
+            elif self.live_audio is None:
+                await _response(send, 503, _json_bytes({"error": "live_audio_unavailable"}))
+            else:
+                body = await self._read_json(receive)
+                await _response(send, 200, _json_bytes(self.live_audio.stop(body.get("session_id"))))
+            return
+
         match = _ARTIFACT_PATH.fullmatch(path)
         if match:
             if not self._dashboard_authorized(scope):
@@ -336,6 +364,47 @@ class RfWebApp:
             return
 
         await self.mcp_app(scope, receive, send)
+
+    async def _live_audio_stream(self, scope: dict, receive: Callable, send: Callable) -> None:
+        from .live_audio import LiveAudioConfig
+        if self.live_audio is None:
+            await _response(send, 503, _json_bytes({"error": "live_audio_unavailable"}))
+            return
+        try:
+            query = parse_qs(scope.get("query_string", b"").decode("ascii"), strict_parsing=True)
+            required = lambda key: query[key][0]
+            settings = LiveAudioConfig(
+                frequency_hz=int(required("frequency_hz")), mode=required("mode"),
+                bandwidth_hz=int(required("bandwidth_hz")),
+                receiver_id=query.get("receiver_id", [None])[0] or None,
+                deemphasis_us=int(query.get("deemphasis_us", ["75"])[0]),
+                maximum_duration_seconds=float(query.get("maximum_duration_seconds", ["300"])[0]))
+            subscription = self.live_audio.subscribe(settings)
+        except (KeyError, ValueError) as exc:
+            await _response(send, 400, _json_bytes({"error": "invalid_live_audio_request", "detail": str(exc)}))
+            return
+        except RuntimeError as exc:
+            message = str(exc)
+            status = 409 if "busy" in message else 503
+            await _response(send, status, _json_bytes({"error": "receiver_busy" if status == 409 else "live_audio_unavailable", "detail": message}))
+            return
+        await send({"type": "http.response.start", "status": 200, "headers": [
+            (b"content-type", b"audio/ogg; codecs=opus"), (b"cache-control", b"no-store"),
+            (b"x-content-type-options", b"nosniff"), (b"x-accel-buffering", b"no")]})
+        try:
+            while True:
+                frame_task = asyncio.create_task(asyncio.to_thread(subscription.frames.get))
+                disconnect_task = asyncio.create_task(receive())
+                done, pending = await asyncio.wait((frame_task, disconnect_task), return_when=asyncio.FIRST_COMPLETED)
+                for task in pending: task.cancel()
+                if disconnect_task in done and disconnect_task.result().get("type") == "http.disconnect": break
+                if frame_task not in done: continue
+                chunk = frame_task.result()
+                if chunk is None: break
+                await send({"type": "http.response.body", "body": chunk, "more_body": True})
+        finally:
+            subscription.close()
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
 
     @staticmethod
     def _security_headers() -> list[tuple[bytes, bytes]]:

@@ -8,6 +8,17 @@ MIN_DURATION_SECONDS = 0.25
 MAX_DURATION_SECONDS = float(os.getenv("RF_MCP_MAX_DURATION", "10"))
 MAX_PEAKS = 50
 
+# Live listening is deliberately bounded.  Unlike the recording limits above these
+# values control an in-memory, non-artifact-producing path and may be tuned by an
+# operator without changing the recording contract.
+LIVE_AUDIO_MAX_DURATION_SECONDS = float(os.getenv("RF_MCP_LIVE_MAX_DURATION", "900"))
+LIVE_AUDIO_MAX_CLIENTS = int(os.getenv("RF_MCP_LIVE_MAX_CLIENTS", "4"))
+LIVE_AUDIO_INPUT_CHUNK_SECONDS = float(os.getenv("RF_MCP_LIVE_CHUNK_SECONDS", "0.10"))
+LIVE_AUDIO_IDLE_TIMEOUT_SECONDS = float(os.getenv("RF_MCP_LIVE_IDLE_TIMEOUT", "15"))
+LIVE_AUDIO_OUTPUT_QUEUE_CHUNKS = int(os.getenv("RF_MCP_LIVE_QUEUE_CHUNKS", "16"))
+LIVE_AUDIO_HISTORY_SIZE = int(os.getenv("RF_MCP_LIVE_HISTORY_SIZE", "32"))
+LIVE_AUDIO_FFMPEG = os.getenv("RF_MCP_LIVE_FFMPEG", "ffmpeg")
+
 DATA_DIR = Path(os.getenv("RF_MCP_DATA_DIR", Path.home() / "SDR-MCP-data"))
 CAPTURE_DIR = DATA_DIR / "captures"
 PLOT_DIR = DATA_DIR / "plots"
