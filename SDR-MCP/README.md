@@ -2248,6 +2248,11 @@ unauthenticated private installation, the dashboard opens directly.
 
 The machine-readable summary is available at `/api/dashboard`. It accepts the
 normal `Authorization: Bearer ...` header or an active dashboard session.
+
+The dashboard storage card reports used, free, and total filesystem capacity. It
+shows a warning at **85% used** and a critical state at **95% used**; at either
+threshold, free space before starting captures because low capacity can cause a
+capture to fail.
 `/healthz` remains public and intentionally reports only basic service status.
 Artifact links retain the existing authentication and stable catalog-ID checks.
 
