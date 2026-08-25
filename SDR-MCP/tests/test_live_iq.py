@@ -71,3 +71,8 @@ def test_slow_consumer_evicts_old_chunks_without_blocking_producer(monkeypatch):
     assert len(calls) == 1
     subscription.close()
     assert released.wait(1)
+    session = manager._sessions[subscription.session_id]
+    assert session.dropped_chunks > 0
+    assert (session.subscribed_monotonic <= session.producer_started_monotonic <=
+            session.receiver_stream_created_monotonic <= session.first_chunk_monotonic <=
+            session.latest_chunk_monotonic <= session.shutdown_completed_monotonic)

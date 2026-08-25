@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import queue
 import threading
+import time
 from typing import Hashable
 from uuid import uuid4
 
@@ -25,6 +26,13 @@ class _IQSession:
     stop: threading.Event
     listeners: list[queue.Queue]
     created_at: str
+    subscribed_monotonic: float
+    producer_started_monotonic: float | None = None
+    receiver_stream_created_monotonic: float | None = None
+    first_chunk_monotonic: float | None = None
+    latest_chunk_monotonic: float | None = None
+    dropped_chunks: int = 0
+    shutdown_completed_monotonic: float | None = None
     state: str = "starting"
     error: str | None = None
 
@@ -70,7 +78,7 @@ class LiveIQManager:
             chunks: queue.Queue = queue.Queue(maxsize=self.queue_chunks)
             if session is None:
                 session = _IQSession(uuid4().hex, rid, hardware_tuning, int(frequency_hz),
-                                     threading.Event(), [chunks], _now())
+                                     threading.Event(), [chunks], _now(), time.monotonic())
                 self._sessions[session.session_id] = session
                 threading.Thread(target=self._produce, args=(session,), daemon=True,
                                  name=f"live-iq-{rid}").start()
@@ -82,15 +90,19 @@ class LiveIQManager:
         with self._lock:
             for listener in tuple(session.listeners):
                 if listener.full():
-                    try: listener.get_nowait()
+                    try:
+                        listener.get_nowait()
+                        if chunk is not None: session.dropped_chunks += 1
                     except queue.Empty: pass
                 try: listener.put_nowait(chunk)
-                except queue.Full: pass
+                except queue.Full:
+                    if chunk is not None: session.dropped_chunks += 1
 
     def _produce(self, session: _IQSession) -> None:
         generator = None
         final_state = "completed"
         try:
+            session.producer_started_monotonic = time.monotonic()
             session.state = "streaming"
             generator = receiver_backend.stream_iq_chunks(
                 session.frequency_hz,
@@ -98,8 +110,12 @@ class LiveIQManager:
                                      config.LIVE_WATERFALL_MAX_DURATION_SECONDS),
                 stop_event=session.stop, receiver_id=session.receiver_id,
                 lease_owner=f"live-iq-{session.session_id}", purpose="shared live IQ")
+            session.receiver_stream_created_monotonic = time.monotonic()
             for chunk in generator:
                 if session.stop.is_set(): break
+                now = time.monotonic()
+                if session.first_chunk_monotonic is None: session.first_chunk_monotonic = now
+                session.latest_chunk_monotonic = now
                 self._publish(session, chunk)
         except Exception as exc:
             final_state = "failed"
@@ -110,6 +126,7 @@ class LiveIQManager:
                 try: generator.close()
                 except Exception: pass
             session.state = final_state
+            session.shutdown_completed_monotonic = time.monotonic()
             self._publish(session, None)
 
     def unsubscribe(self, session_id: str, chunks: queue.Queue) -> None:

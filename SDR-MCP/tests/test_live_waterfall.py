@@ -8,7 +8,8 @@ import numpy as np
 import pytest
 
 from rf_mcp import config
-from rf_mcp.live_waterfall import LiveWaterfallConfig, LiveWaterfallManager, make_spectral_row
+from rf_mcp.live_waterfall import (LiveWaterfallConfig, LiveWaterfallManager,
+                                   LiveWaterfallState, _Session, make_spectral_row)
 
 
 def settings(**changes):
@@ -113,3 +114,16 @@ def test_last_disconnect_stops_session(monkeypatch):
     subscription.close(); release.set()
     assert closed.wait(2)
     assert manager.status()['sessions'][0]['termination_reason'] == 'stopped'
+
+
+def test_public_row_rate_drop_and_stop_metrics():
+    session = _Session('s', settings(), 'r', LiveWaterfallState.COMPLETED, 'now',
+                       rows_produced=6, first_iq_monotonic=1,
+                       first_row_monotonic=1.1, latest_row_monotonic=2.1,
+                       stop_requested_monotonic=2.2, stopped_monotonic=2.25,
+                       rows_dropped=2)
+    public = session.public()
+    assert public['first_iq_monotonic'] < public['first_row_monotonic']
+    assert public['effective_row_rate_hz'] == 5
+    assert public['rows_dropped'] == 2
+    assert public['stop_latency_ms'] == 50

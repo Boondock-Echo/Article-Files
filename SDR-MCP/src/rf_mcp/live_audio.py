@@ -220,8 +220,17 @@ class _Session:
     client_count: int = 0
     termination_reason: str | None = None
     error: str | None = None
+    first_iq_monotonic: float | None = None
+    first_pcm_monotonic: float | None = None
+    first_encoded_chunk_monotonic: float | None = None
+    stop_requested_monotonic: float | None = None
+    stopped_monotonic: float | None = None
+    queue_drops: int = 0
+    encoder_output_error: str | None = None
     def public(self):
         result = asdict(self); result["state"] = self.state.value; result["config"] = asdict(self.config)
+        result["time_to_stop_ms"] = (None if self.stop_requested_monotonic is None or self.stopped_monotonic is None
+                                     else round((self.stopped_monotonic-self.stop_requested_monotonic)*1000, 3))
         return result
 
 
@@ -269,17 +278,33 @@ class LiveAudioManager:
         with self._lock:
             for listener in self._listeners.get(session.session_id, []):
                 if listener.full():
-                    try: listener.get_nowait()
+                    try:
+                        listener.get_nowait()
+                        if chunk is not None: session.queue_drops += 1
                     except queue.Empty: pass
                 try: listener.put_nowait(chunk)
-                except queue.Full: pass
+                except queue.Full:
+                    if chunk is not None: session.queue_drops += 1
+
+    def _read_encoder(self, session, encoder, stop):
+        """Forward encoder output while retaining failures from this worker thread."""
+        try:
+            for chunk in encoder.chunks():
+                if session.first_encoded_chunk_monotonic is None:
+                    session.first_encoded_chunk_monotonic = time.monotonic()
+                self._broadcast(session, chunk)
+        except Exception as exc:
+            session.encoder_output_error = f"{type(exc).__name__}: {str(exc)[:240]}"
+            session.error = session.encoder_output_error
+            stop.set()
 
     def _produce(self, session, stop, iq_subscription):
         encoder = None
         try:
             encoder = self.encoder_factory(); sample_rate = receiver_backend.SAMPLE_RATE
             dsp = StreamingDemodulator(session.config, sample_rate)
-            threading.Thread(target=lambda: [self._broadcast(session, c) for c in encoder.chunks()], daemon=True).start()
+            threading.Thread(target=self._read_encoder, args=(session, encoder, stop), daemon=True,
+                             name=f"live-audio-encoder-{session.receiver_id}").start()
             session.state, session.started_at = LiveAudioState.STREAMING, _now()
             deadline = time.monotonic() + session.config.maximum_duration_seconds
             while not stop.is_set() and time.monotonic() < deadline:
@@ -288,7 +313,11 @@ class LiveAudioManager:
                 if iq is None:
                     if iq_subscription.error: raise RuntimeError(iq_subscription.error)
                     break
-                for pcm in dsp.process(iq): encoder.write(pcm)
+                if session.first_iq_monotonic is None: session.first_iq_monotonic = time.monotonic()
+                for pcm in dsp.process(iq):
+                    if session.first_pcm_monotonic is None: session.first_pcm_monotonic = time.monotonic()
+                    encoder.write(pcm)
+            if session.encoder_output_error: raise RuntimeError(session.encoder_output_error)
             session.termination_reason = "stopped" if stop.is_set() else "duration_limit"
             session.state = LiveAudioState.COMPLETED
         except Exception as exc:
@@ -298,6 +327,7 @@ class LiveAudioManager:
             stop.set()
             if iq_subscription is not None: iq_subscription.close()
             if encoder is not None: encoder.close()
+            session.stopped_monotonic = time.monotonic()
             session.ended_at = _now(); self._broadcast(session, None)
             with self._lock: self._history.append(session.public())
 
@@ -309,6 +339,7 @@ class LiveAudioManager:
             if session: session.client_count = len(listeners)
             if session and not listeners and session.state in (LiveAudioState.STARTING, LiveAudioState.STREAMING):
                 session.state = LiveAudioState.STOPPING; session.termination_reason = "stopped"
+                session.stop_requested_monotonic = time.monotonic()
                 self._stops[session_id].set()
 
     def status(self):
@@ -322,6 +353,7 @@ class LiveAudioManager:
                 if sid in self._stops:
                     found = True; self._stops[sid].set()
                     s = self._sessions[sid]
+                    if s.stop_requested_monotonic is None: s.stop_requested_monotonic = time.monotonic()
                     if s.state in (LiveAudioState.STARTING, LiveAudioState.STREAMING): s.state = LiveAudioState.STOPPING
             return {"stopped": found, "session_id": session_id}
 

@@ -167,6 +167,9 @@ class RfWebApp:
         self.live_waterfall = services.live_waterfall if services is not None else None
         self._sessions: dict[str, float] = {}
         self._dashboard_assets: tuple[bytes, bytes, bytes] | None = None
+        # Process-local monotonic measurements only: no query strings, tuning,
+        # credentials, or other request data are retained here.
+        self._live_stream_metrics: dict[str, dict] = {}
 
     def _dashboard_authorized(self, scope: dict) -> bool:
         if authorized(scope, self.token):
@@ -374,7 +377,9 @@ class RfWebApp:
             elif self.live_audio is None:
                 await _response(send, 503, _json_bytes({"error": "live_audio_unavailable"}))
             else:
-                await _response(send, 200, _json_bytes(self.live_audio.status()))
+                payload = self.live_audio.status()
+                payload["web_stream"] = self._live_stream_metrics.get("audio")
+                await _response(send, 200, _json_bytes(payload))
             return
 
         if path == "/api/live-audio/stop" and scope.get("method") == "POST":
@@ -400,7 +405,9 @@ class RfWebApp:
             elif self.live_waterfall is None:
                 await _response(send, 503, _json_bytes({"error": "live_waterfall_unavailable"}))
             else:
-                await _response(send, 200, _json_bytes(self.live_waterfall.status()),
+                payload = self.live_waterfall.status()
+                payload["web_stream"] = self._live_stream_metrics.get("waterfall")
+                await _response(send, 200, _json_bytes(payload),
                                 extra_headers=[(b"cache-control", b"no-store")])
             return
         if path == "/api/live-waterfall/stop" and scope.get("method") == "POST":
@@ -445,6 +452,7 @@ class RfWebApp:
 
     async def _live_audio_stream(self, scope: dict, receive: Callable, send: Callable) -> None:
         from .live_audio import LiveAudioConfig
+        request_started = time.monotonic()
         if self.live_audio is None:
             await _response(send, 503, _json_bytes({"error": "live_audio_unavailable"}))
             return
@@ -458,6 +466,7 @@ class RfWebApp:
                 deemphasis_us=int(query.get("deemphasis_us", ["75"])[0]),
                 maximum_duration_seconds=float(query.get("maximum_duration_seconds", ["300"])[0]))
             subscription = self.live_audio.subscribe(settings)
+            subscribed = time.monotonic()
         except (KeyError, ValueError) as exc:
             await _response(send, 400, _json_bytes({"error": "invalid_live_audio_request", "detail": str(exc)}))
             return
@@ -466,6 +475,12 @@ class RfWebApp:
             status = 409 if "busy" in message else 503
             await _response(send, status, _json_bytes({"error": "receiver_busy" if status == 409 else "live_audio_unavailable", "detail": message}))
             return
+        metric = {"session_id": getattr(subscription, "session_id", None),
+                  "request_started_monotonic": request_started,
+                  "subscription_ready_monotonic": subscribed,
+                  "subscription_setup_ms": round((subscribed-request_started)*1000, 3),
+                  "first_body_send_monotonic": None, "first_body_send_ms": None}
+        self._live_stream_metrics["audio"] = metric
         await send({"type": "http.response.start", "status": 200, "headers": [
             (b"content-type", b"audio/ogg; codecs=opus"), (b"cache-control", b"no-store"),
             (b"x-content-type-options", b"nosniff"), (b"x-accel-buffering", b"no")]})
@@ -480,12 +495,16 @@ class RfWebApp:
                 chunk = frame_task.result()
                 if chunk is None: break
                 await send({"type": "http.response.body", "body": chunk, "more_body": True})
+                if metric["first_body_send_monotonic"] is None:
+                    metric["first_body_send_monotonic"] = time.monotonic()
+                    metric["first_body_send_ms"] = round((metric["first_body_send_monotonic"]-request_started)*1000, 3)
         finally:
             subscription.close()
         await send({"type": "http.response.body", "body": b"", "more_body": False})
 
     async def _live_waterfall_stream(self, scope: dict, receive: Callable, send: Callable) -> None:
         from .live_waterfall import LiveWaterfallConfig
+        request_started = time.monotonic()
         if self.live_waterfall is None:
             await _response(send, 503, _json_bytes({"error": "live_waterfall_unavailable"}))
             return
@@ -504,6 +523,7 @@ class RfWebApp:
                 quantization_bits=int(value("quantization_bits", "8")),
                 maximum_duration_seconds=float(value("maximum_duration_seconds", "300")))
             subscription = self.live_waterfall.subscribe(settings)
+            subscribed = time.monotonic()
         except (TypeError, ValueError) as exc:
             await _response(send, 400, _json_bytes({"error": "invalid_live_waterfall_request", "detail": str(exc)}))
             return
@@ -511,6 +531,13 @@ class RfWebApp:
             message = str(exc); status = 409 if "busy" in message else 503
             await _response(send, status, _json_bytes({"error": "receiver_busy" if status == 409 else "live_waterfall_unavailable", "detail": message}))
             return
+        metric = {"session_id": getattr(subscription, "session_id", None),
+                  "request_started_monotonic": request_started,
+                  "subscription_ready_monotonic": subscribed,
+                  "subscription_setup_ms": round((subscribed-request_started)*1000, 3),
+                  "first_body_send_monotonic": None, "first_body_send_ms": None,
+                  "first_row_send_monotonic": None, "first_row_send_ms": None}
+        self._live_stream_metrics["waterfall"] = metric
         await send({"type": "http.response.start", "status": 200, "headers": [
             (b"content-type", b"application/x-ndjson; charset=utf-8"), (b"cache-control", b"no-store"),
             (b"x-content-type-options", b"nosniff"), (b"x-accel-buffering", b"no")]})
@@ -519,6 +546,8 @@ class RfWebApp:
         # block, so flush a harmless blank NDJSON line immediately; otherwise the
         # browser's fetch() remains pending and the dashboard stays on Connecting.
         await send({"type": "http.response.body", "body": b"\n", "more_body": True})
+        metric["first_body_send_monotonic"] = time.monotonic()
+        metric["first_body_send_ms"] = round((metric["first_body_send_monotonic"]-request_started)*1000, 3)
         try:
             while True:
                 row_task = asyncio.create_task(asyncio.to_thread(subscription.rows.get))
@@ -530,6 +559,9 @@ class RfWebApp:
                 frame = row_task.result()
                 if frame is None: break
                 await send({"type": "http.response.body", "body": _json_bytes(frame), "more_body": True})
+                if metric["first_row_send_monotonic"] is None:
+                    metric["first_row_send_monotonic"] = time.monotonic()
+                    metric["first_row_send_ms"] = round((metric["first_row_send_monotonic"]-request_started)*1000, 3)
         finally:
             subscription.close()
         await send({"type": "http.response.body", "body": b"", "more_body": False})

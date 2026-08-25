@@ -4,7 +4,8 @@ import numpy as np
 import queue
 import threading
 
-from rf_mcp.live_audio import LiveAudioConfig, LiveAudioManager, StreamingDemodulator, complex_iq
+from rf_mcp.live_audio import (LiveAudioConfig, LiveAudioManager, LiveAudioState,
+                               StreamingDemodulator, _Session, complex_iq)
 
 
 def _settings(mode="nfm"):
@@ -75,3 +76,15 @@ def test_different_demodulators_can_share_compatible_iq(monkeypatch):
     assert [call[0] for call, _ in iq.subscriptions] == [100_000_000, 100_000_000]
     am.close(); fm.close()
     assert all(subscription.closed.wait(1) for _, subscription in iq.subscriptions)
+
+
+def test_public_startup_and_stop_metrics_are_ordered():
+    session = _Session("s", _settings(), "r1", LiveAudioState.COMPLETED, "now",
+                       first_iq_monotonic=10, first_pcm_monotonic=10.1,
+                       first_encoded_chunk_monotonic=10.2,
+                       stop_requested_monotonic=11, stopped_monotonic=11.025,
+                       queue_drops=3)
+    public = session.public()
+    assert public["first_iq_monotonic"] < public["first_pcm_monotonic"] < public["first_encoded_chunk_monotonic"]
+    assert public["queue_drops"] == 3
+    assert public["time_to_stop_ms"] == 25

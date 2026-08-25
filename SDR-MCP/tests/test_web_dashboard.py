@@ -159,6 +159,11 @@ def test_live_waterfall_stream_delimits_each_ndjson_frame():
     assert json.loads(chunks[0]) == {
         "session_id": "waterfall-1", "sequence": 0, "row": "AA==",
     }
+    metric = app._live_stream_metrics["waterfall"]
+    assert metric["request_started_monotonic"] <= metric["subscription_ready_monotonic"]
+    assert metric["subscription_ready_monotonic"] <= metric["first_body_send_monotonic"]
+    assert metric["first_body_send_monotonic"] <= metric["first_row_send_monotonic"]
+    assert "frequency" not in json.dumps(metric).lower()
 
 
 def test_dashboard_assets_are_packaged_and_have_stable_landmarks():
@@ -178,6 +183,10 @@ def test_dashboard_assets_are_packaged_and_have_stable_landmarks():
     assert "function renderStatus" in script
     assert "function renderEmptyState" in script
     assert "uxStyle" not in script
+    assert "performance.now()" in script
+    for phase in ("Allocating receiver", "Waiting for IQ", "Encoding audio",
+                  "Buffering media", "Waiting for the first waterfall row"):
+        assert phase in script
 
 
 def test_dashboard_preferences_are_versioned_validated_and_safe():
