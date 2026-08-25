@@ -971,3 +971,44 @@ def test_receiver_owner_disables_duplicate_starts_with_local_context():
     assert "button.disabled=Boolean(active)" in script
     assert "Receiver occupied by ${owner}" in script
     assert "workspace.querySelector('.receiver-owner')" in script
+
+
+def test_dashboard_image_viewer_is_accessible_and_used_for_every_image_path():
+    assets = resources.files("rf_mcp").joinpath("assets")
+    script = assets.joinpath("dashboard.js").read_text(encoding="utf-8")
+    stylesheet = assets.joinpath("dashboard.css").read_text(encoding="utf-8")
+
+    assert "imageViewer.setAttribute('aria-labelledby','imageViewerTitle')" in script
+    assert "imageViewer.setAttribute('aria-describedby','imageViewerCaption')" in script
+    assert 'role="toolbar" aria-label="Image zoom controls"' in script
+    for control in ("imageViewerZoomIn", "imageViewerZoomOut", "imageViewerReset",
+                    "imageViewerClose", "imageViewerDownload"):
+        assert control in script
+    assert "imageViewer.addEventListener('cancel'" in script
+    assert "event.key==='Escape'" in script
+    assert "imageViewerOpener?.isConnected" in script
+    assert "imageViewerOpener.focus()" in script
+    assert "event.key!=='Tab'" in script
+    assert "event.target===imageViewer" in script
+    assert "imageViewerDownload.href=downloadUrl||image.src" in script
+    assert "download.href=downloadUrl||image.src||'#'" in script
+    assert "View full size" in script
+
+    for image_id in ("spectrumPlot", "rfAnalysisPlot", "audioAnalysisPlot", "fmPlot",
+                     "digitalWaterfall"):
+        assert f"'{image_id}'" in script
+    assert "makeZoomableImage(img,{title,caption:" in script
+    assert "makeZoomableImage(image,{title:imageName,caption:" in script
+    assert "a.filename" in script
+    assert "x.sstv_mode" in script
+    assert "x.frequency_hz" in script
+
+    for selector in (".image-viewer::backdrop", ".image-viewer-viewport",
+                     ".image-viewer-image", ".image-viewer-caption",
+                     ".image-viewer-toolbar", ".image-thumbnail-actions"):
+        assert selector in stylesheet
+    assert "overflow:auto;overscroll-behavior:contain" in stylesheet
+    assert "@media(forced-colors:active)" in stylesheet
+    assert "@media(prefers-reduced-motion:reduce)" in stylesheet
+    assert "target='_blank'" not in script
+    assert 'target="_blank"' not in script
