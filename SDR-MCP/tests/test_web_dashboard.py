@@ -1184,6 +1184,18 @@ def test_dashboard_frequency_controls_share_memory_recall_and_integer_hz_payload
     assert "outside the selected receiver’s supported range" in script
 
 
+def test_dashboard_waterfall_scrolls_in_device_pixels_without_scaling_old_rows():
+    script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
+        encoding="utf-8"
+    )
+
+    # drawImage's destination is affected by the canvas transform. Resetting the
+    # DPR transform prevents every self-copy from stretching the existing rows.
+    assert "waterfallContext.resetTransform()" in script
+    assert "rowHeight=Math.max(1,Math.round(dpr))" in script
+    assert "top+rowHeight" in script
+
+
 def test_dashboard_frequency_enhancement_allows_initially_empty_forms():
     script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
         encoding="utf-8"
