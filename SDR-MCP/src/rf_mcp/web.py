@@ -414,7 +414,7 @@ class RfWebApp:
             elif self.live_audio is None:
                 await _response(send, 503, _json_bytes({"error": "live_audio_unavailable"}))
             else:
-                body = await self._read_json(receive)
+                body = await self._json_request(receive)
                 await _response(send, 200, _json_bytes(self.live_audio.stop(body.get("session_id"))))
             return
 
@@ -442,9 +442,20 @@ class RfWebApp:
             elif self.live_waterfall is None:
                 await _response(send, 503, _json_bytes({"error": "live_waterfall_unavailable"}))
             else:
-                body = await self._read_json(receive)
-                await _response(send, 200, _json_bytes(self.live_waterfall.stop(body.get("session_id"))),
-                                extra_headers=[(b"cache-control", b"no-store")])
+                body = await self._json_request(receive)
+                session_id = body.get("session_id")
+                if not isinstance(session_id, str) or not session_id.strip():
+                    await _response(send, 400, _json_bytes({
+                        "error": "session_id_required",
+                        "detail": "A live waterfall session_id is required; stop-all is not exposed over HTTP.",
+                    }), extra_headers=[(b"cache-control", b"no-store")])
+                else:
+                    result = self.live_waterfall.stop(session_id)
+                    await _response(send, 200 if result["stopped"] else 404,
+                                    _json_bytes(result if result["stopped"] else {
+                                        "error": "unknown_live_waterfall_session",
+                                        "session_id": session_id,
+                                    }), extra_headers=[(b"cache-control", b"no-store")])
             return
 
         match = _ARTIFACT_PATH.fullmatch(path)

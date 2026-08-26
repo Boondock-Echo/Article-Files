@@ -166,6 +166,33 @@ def test_live_waterfall_stream_delimits_each_ndjson_frame():
     assert "frequency" not in json.dumps(metric).lower()
 
 
+def test_live_waterfall_http_stop_requires_and_scopes_session_id():
+    stopped = []
+    manager = SimpleNamespace(stop=lambda session_id: (
+        stopped.append(session_id) or {"stopped": session_id == "waterfall-1",
+                                       "session_id": session_id}))
+    services = SimpleNamespace(spectrum_capture=None, signal_analyzer=None,
+                               broadcast_fm_receiver=None, live_audio=None,
+                               live_waterfall=manager)
+    app = RfWebApp(downstream, FakeCatalog(), None, "1.1.0", services=services)
+
+    missing = asyncio.run(request(app, "/api/live-waterfall/stop", method="POST",
+                                  body=b'{"session_id":null}'))
+    assert missing[0]["status"] == 400
+    assert json.loads(response_body(missing))["error"] == "session_id_required"
+    assert stopped == []
+
+    known = asyncio.run(request(app, "/api/live-waterfall/stop", method="POST",
+                                body=b'{"session_id":"waterfall-1"}'))
+    assert known[0]["status"] == 200
+    assert stopped == ["waterfall-1"]
+
+    unknown = asyncio.run(request(app, "/api/live-waterfall/stop", method="POST",
+                                  body=b'{"session_id":"waterfall-2"}'))
+    assert unknown[0]["status"] == 404
+    assert json.loads(response_body(unknown))["error"] == "unknown_live_waterfall_session"
+
+
 def test_live_audio_forwards_first_body_immediately_without_coalescing():
     frames = queue.Queue()
     subscription = SimpleNamespace(session_id="audio-1", frames=frames, close=lambda: None)
