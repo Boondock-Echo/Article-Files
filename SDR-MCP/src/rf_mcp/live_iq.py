@@ -148,6 +148,26 @@ class LiveIQManager:
             session = self._sessions.get(session_id)
             return session.error if session is not None else None
 
+    def status(self) -> dict:
+        """Return sanitized operational counters for the diagnostics endpoint."""
+        with self._lock:
+            sessions = []
+            for item in self._sessions.values():
+                occupancy = [listener.qsize() for listener in item.listeners]
+                sessions.append({
+                    "session_id": item.session_id, "receiver_id": item.receiver_id,
+                    "state": item.state, "listener_count": len(item.listeners),
+                    "queue_capacity_chunks": self.queue_chunks,
+                    "queue_occupancy_chunks": occupancy,
+                    "dropped_chunks": item.dropped_chunks,
+                    "receiver_startup_ms": (None if item.first_chunk_monotonic is None else
+                        round((item.first_chunk_monotonic-item.subscribed_monotonic)*1000, 3)),
+                    "last_iq_age_ms": (None if item.latest_chunk_monotonic is None else
+                        round((time.monotonic()-item.latest_chunk_monotonic)*1000, 3)),
+                })
+            return {"chunk_duration_seconds": config.LIVE_IQ_CHUNK_SECONDS,
+                    "sessions": sessions}
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()

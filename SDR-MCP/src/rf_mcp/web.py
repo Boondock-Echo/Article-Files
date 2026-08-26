@@ -9,6 +9,7 @@ import math
 import re
 import secrets
 import time
+import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -381,6 +382,30 @@ class RfWebApp:
                 payload = self.live_audio.status()
                 payload["web_stream"] = self._live_stream_metrics.get("audio")
                 await _response(send, 200, _json_bytes(payload))
+            return
+
+        if path == "/api/live/diagnostics" and scope.get("method") == "GET":
+            if not self._dashboard_authorized(scope):
+                await _response(send, 401, _json_bytes({"error": "unauthorized"}))
+            else:
+                from . import config, receiver_backend
+                from .sdr_coordinator import list_receivers
+                receivers = list_receivers()
+                iq = None
+                for manager in (self.live_audio, self.live_waterfall):
+                    iq_manager = getattr(manager, "iq_manager", None)
+                    if iq_manager is not None:
+                        iq = iq_manager.status()
+                        break
+                await _response(send, 200, _json_bytes({
+                    "ffmpeg": {"executable": config.LIVE_AUDIO_FFMPEG,
+                               "available": shutil.which(config.LIVE_AUDIO_FFMPEG) is not None,
+                               "opus": (self.live_audio.capabilities().get("available")
+                                        if self.live_audio is not None else False)},
+                    "selected_backends": sorted({r["backend"] for r in receivers if r.get("enabled")}),
+                    "live_chunk_duration_seconds": config.LIVE_IQ_CHUNK_SECONDS,
+                    "iq": iq, "first_output": dict(self._live_stream_metrics),
+                }), extra_headers=[(b"cache-control", b"no-store")])
             return
 
         if path == "/api/live-audio/stop" and scope.get("method") == "POST":

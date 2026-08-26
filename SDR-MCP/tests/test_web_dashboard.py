@@ -193,6 +193,27 @@ def test_live_audio_forwards_first_body_immediately_without_coalescing():
     assert bodies == [b"first-page", b"second-page", b""]
 
 
+def test_authenticated_live_diagnostics_reports_capability_and_queue_metrics(monkeypatch):
+    iq = SimpleNamespace(status=lambda: {"chunk_duration_seconds": .1, "sessions": [{
+        "queue_occupancy_chunks": [2], "dropped_chunks": 1,
+        "receiver_startup_ms": 12.5, "last_iq_age_ms": 3.0}]})
+    audio = SimpleNamespace(iq_manager=iq, capabilities=lambda: {"available": True})
+    services = SimpleNamespace(spectrum_capture=None, signal_analyzer=None,
+                               broadcast_fm_receiver=None, live_audio=audio,
+                               live_waterfall=None)
+    monkeypatch.setattr("rf_mcp.sdr_coordinator.list_receivers", lambda: [
+        {"backend": "fake", "enabled": True}])
+    app = RfWebApp(downstream, FakeCatalog(), "x" * 32, "1.1.0", services=services)
+    messages = asyncio.run(request(app, "/api/live/diagnostics", headers=[
+        (b"authorization", b"Bearer " + b"x" * 32)]))
+    result = json.loads(response_body(messages))
+    assert result["selected_backends"] == ["fake"]
+    assert result["iq"]["sessions"][0]["queue_occupancy_chunks"] == [2]
+    assert result["iq"]["sessions"][0]["receiver_startup_ms"] == 12.5
+    assert "available" in result["ffmpeg"]
+    assert response_headers(messages)[b"cache-control"] == b"no-store"
+
+
 def test_dashboard_assets_are_packaged_and_have_stable_landmarks():
     assets = resources.files("rf_mcp").joinpath("assets")
     document = assets.joinpath("dashboard.html").read_text(encoding="utf-8")

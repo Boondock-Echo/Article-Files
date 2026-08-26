@@ -2491,9 +2491,40 @@ Defaults are bounded by `RF_MCP_LIVE_MAX_DURATION`, `RF_MCP_LIVE_MAX_CLIENTS`,
 `RF_MCP_LIVE_QUEUE_CHUNKS`.
 
 Reverse proxies must disable response buffering (for nginx,
-`proxy_buffering off`) and use a read timeout longer than the configured maximum
-session duration. They must preserve streaming/chunked responses and must not
-synthesize a `Content-Length` header.
+`proxy_buffering off`) and use a read/send timeout longer than the configured
+maximum session duration. Disable compression for both `audio/ogg` and
+`application/x-ndjson` (nginx: `gzip off` in these locations), preserve
+streaming/chunked responses, and never synthesize a `Content-Length` header.
+The application also emits `X-Accel-Buffering: no`, but operators must not rely
+on an intermediary honoring it. A minimal nginx location is:
+
+```nginx
+location ~ ^/api/live-(audio|waterfall)$ {
+    proxy_pass http://127.0.0.1:8765;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    gzip off;
+    proxy_read_timeout 20m;
+    proxy_send_timeout 20m;
+}
+```
+
+Inspect server and proxy timing without consuming an unbounded stream:
+
+```sh
+curl -sS -o /dev/null -N --max-time 5 -w 'headers=%{time_starttransfer}s total=%{time_total}s\n' \
+  -H "Authorization: Bearer $RF_MCP_API_TOKEN" "$URL/api/live-waterfall?center_frequency_hz=100100000"
+curl -sS -H "Authorization: Bearer $RF_MCP_API_TOKEN" "$URL/api/live/diagnostics" | python -m json.tool
+python scripts/live-diagnostic-matrix.py http://127.0.0.1:8765 https://proxy.example \
+  --token "$RF_MCP_API_TOKEN" --backend-model 'Airspy HF+' --sample-rate 768000 \
+  --proxy-topology 'browser -> CDN -> nginx -> uvicorn'
+```
+
+The authenticated diagnostics response reports FFmpeg/Opus capability, enabled
+backends, chunk duration, IQ queue occupancy and drops, receiver startup and
+last-IQ age, plus ASGI subscription and first-output timings. It contains no
+tuning frequency or credentials.
 
 MCP tools expose capabilities, sanitized session status, and stop control. MCP
 results are not the media transport and never contain bearer tokens or base64
