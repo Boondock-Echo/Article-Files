@@ -12,6 +12,24 @@ excluded from these results.
   acceptance measurement.
 * Live queue drops: **0** during an unloaded startup run.
 
+## Acceptance thresholds
+
+Mocked CI uses deterministic tone input and enforces: headers **≤100 ms**, first
+waterfall data **≤500 ms**, first audio data **≤1,500 ms**, inter-chunk gap
+**≤500 ms**, and stop/lease release **≤500 ms**. Hardware smoke tests are
+opt-in (`RF_MCP_HARDWARE_SMOKE=1`) because scheduler and USB startup variance is
+real: headers **≤250 ms**, first waterfall **≤2,000 ms**, first audio **≤4,000
+ms**, inter-chunk gap **≤1,500 ms**, and stop/lease release **≤2,000 ms**.
+
+Every saved result must include backend manufacturer/model, configured and
+observed sample rate, host load averages, direct/proxy/remote stage, and proxy
+topology. Never compare a mocked result with a hardware result.
+
+Run `scripts/live-diagnostic-matrix.py` with the direct application URL, the
+production proxy URL, and a browser-reachable URL before and after a change.
+Rank the deltas for header, receiver startup, first IQ, first encoded output or
+row, proxy transit, and browser play/render; optimize the largest measured stage.
+
 ## Backend results
 
 Record at least ten cold starts and ten warm starts for each backend. Report
