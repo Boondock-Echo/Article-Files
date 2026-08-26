@@ -179,7 +179,7 @@ class LiveWaterfallManager:
             rows = queue.Queue(maxsize=config.LIVE_WATERFALL_QUEUE_ROWS)
             rows.put_nowait({"type": "metadata", "session_id": session.session_id,
                              "receiver_id": session.receiver_id,
-                             "config": asdict(session.config), "state": "starting"})
+                             "config": asdict(session.config), "state": session.state.value})
             history = [frame for frame in self._rows[session.session_id]
                        if frame.get("type", "row") == "row"]
             for frame in history[-max(0, rows.maxsize-1):]:
