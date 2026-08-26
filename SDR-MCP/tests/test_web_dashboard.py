@@ -1176,6 +1176,9 @@ def test_dashboard_frequency_controls_share_memory_recall_and_integer_hz_payload
     assert "['frequency','audioFrequency','fmFrequency','digitalFrequency','sstvFrequency','bandStart']" in script
     assert "frequency_hz:frequencyValue('fmFrequency')" in script
     assert "center_frequency_hz:frequencyValue('frequency')" in script
+    assert "['waterfallFrequency','waterfallStatus',{}]" in script
+    assert "['waterfallForm',['waterfallFrequency'],'waterfallStatus']" in script
+    assert "center_frequency_hz:String(frequencyValue('waterfallFrequency'))" in script
     assert "start_frequency_hz:frequencyValue('bandStart')" in script
     assert "Stop frequency must be greater than start frequency" in script
     assert "outside the selected receiver’s supported range" in script
