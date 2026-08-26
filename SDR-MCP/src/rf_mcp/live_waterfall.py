@@ -123,6 +123,8 @@ class _Session:
     stop_requested_monotonic: float | None = None
     stopped_monotonic: float | None = None
     rows_dropped: int = 0
+    source_blocks_skipped: int = 0
+    pending_peak_samples: int = 0
 
     def public(self):
         value = asdict(self); value["state"] = self.state.value; value["config"] = asdict(self.config)
@@ -175,7 +177,12 @@ class LiveWaterfallManager:
                                  name=f"live-waterfall-{rid}").start()
             if session.client_count >= config.LIVE_WATERFALL_MAX_CLIENTS: raise RuntimeError("live waterfall client limit reached")
             rows = queue.Queue(maxsize=config.LIVE_WATERFALL_QUEUE_ROWS)
-            for frame in self._rows[session.session_id]:
+            rows.put_nowait({"type": "metadata", "session_id": session.session_id,
+                             "receiver_id": session.receiver_id,
+                             "config": asdict(session.config), "state": "starting"})
+            history = [frame for frame in self._rows[session.session_id]
+                       if frame.get("type", "row") == "row"]
+            for frame in history[-max(0, rows.maxsize-1):]:
                 if rows.full(): rows.get_nowait()
                 rows.put_nowait(frame)
             self._listeners[session.session_id].append(rows); session.client_count += 1
@@ -188,41 +195,63 @@ class LiveWaterfallManager:
                 if listener.full():
                     try:
                         listener.get_nowait()
-                        if frame is not None:
+                        if frame is not None and frame.get("type", "row") == "row":
                             session.rows_dropped = getattr(session, "rows_dropped", 0) + 1
                     except queue.Empty: pass
                 try: listener.put_nowait(frame)
                 except queue.Full:
-                    if frame is not None:
+                    if frame is not None and frame.get("type", "row") == "row":
                         session.rows_dropped = getattr(session, "rows_dropped", 0) + 1
 
     def _produce(self, session, stop, iq_subscription):
         try:
             cfg = session.config; window = np.hanning(cfg.fft_size).astype(np.float32)
-            pending = np.empty(0, np.complex64); next_row = time.monotonic()
-            session.state = LiveWaterfallState.STREAMING; session.started_at = _now()
+            # A deque of immutable chunk views avoids reallocating and copying all
+            # pending IQ after every backend read.  At most one incomplete block
+            # plus the newest complete block is retained.
+            pending = deque(); pending_samples = 0; candidate = None
+            next_row = time.monotonic()
             deadline = time.monotonic() + cfg.maximum_duration_seconds
             while not stop.is_set() and time.monotonic() < deadline:
-                try: chunk = iq_subscription.chunks.get(timeout=min(.1, max(0, deadline-time.monotonic())))
-                except queue.Empty: continue
+                timeout = min(.1, max(0, deadline-time.monotonic()))
+                if candidate is not None: timeout = min(timeout, max(0, next_row-time.monotonic()))
+                try: chunk = iq_subscription.chunks.get(timeout=timeout)
+                except queue.Empty: chunk = ...
                 if chunk is None:
                     if iq_subscription.error: raise RuntimeError(iq_subscription.error)
                     break
-                if session.first_iq_monotonic is None: session.first_iq_monotonic = time.monotonic()
-                pending = np.concatenate((pending, complex_iq(chunk)))
-                while pending.size >= cfg.fft_size:
-                    block, pending = pending[:cfg.fft_size], pending[cfg.fft_size:]
-                    now = time.monotonic()
-                    if now < next_row: continue
-                    row, low, high = make_spectral_row(block, cfg, window)
-                    frame = {"session_id": session.session_id, "sequence": session.rows_produced,
+                if chunk is not ...:
+                    values = complex_iq(chunk)
+                    if values.size:
+                        if session.first_iq_monotonic is None:
+                            session.first_iq_monotonic = time.monotonic()
+                            session.state = LiveWaterfallState.STREAMING; session.started_at = _now()
+                            self._broadcast(session, {"type": "state", "session_id": session.session_id,
+                                                      "state": "streaming"})
+                        pending.append(values); pending_samples += values.size
+                        session.pending_peak_samples = max(session.pending_peak_samples,
+                                                           min(pending_samples, cfg.fft_size * 2))
+                    while pending_samples >= cfg.fft_size:
+                        block = np.empty(cfg.fft_size, np.complex64); offset = 0
+                        while offset < cfg.fft_size:
+                            head = pending[0]; take = min(head.size, cfg.fft_size-offset)
+                            block[offset:offset+take] = head[:take]; offset += take
+                            if take == head.size: pending.popleft()
+                            else: pending[0] = head[take:]
+                            pending_samples -= take
+                        if candidate is not None: session.source_blocks_skipped += 1
+                        candidate = block
+                now = time.monotonic()
+                if candidate is not None and now >= next_row:
+                    row, low, high = make_spectral_row(candidate, cfg, window); candidate = None
+                    frame = {"type": "row", "session_id": session.session_id, "sequence": session.rows_produced,
                              "timestamp": _now(), "frequency_start_hz": low, "frequency_end_hz": high,
                              "bin_count": int(row.size), "bits": cfg.quantization_bits,
                              "encoding": "base64", "row": base64.b64encode(row.tobytes()).decode("ascii")}
                     if session.first_row_monotonic is None: session.first_row_monotonic = now
                     session.latest_row_monotonic = now
                     session.rows_produced += 1; self._broadcast(session, frame)
-                    next_row = now + 1 / cfg.update_rate_hz
+                    next_row = max(next_row + 1 / cfg.update_rate_hz, now)
             session.termination_reason = "stopped" if stop.is_set() else "duration_limit"
             session.state = LiveWaterfallState.COMPLETED
         except Exception as exc:
@@ -232,7 +261,11 @@ class LiveWaterfallManager:
             stop.set()
             iq_subscription.close()
             session.stopped_monotonic = time.monotonic()
-            session.ended_at = _now(); self._broadcast(session, None)
+            session.ended_at = _now()
+            self._broadcast(session, {"type": "terminal", "session_id": session.session_id,
+                                      "state": session.state.value,
+                                      "reason": session.termination_reason, "error": session.error})
+            self._broadcast(session, None)
             with self._lock: self._history.append(session.public())
 
     def unsubscribe(self, session_id, rows):

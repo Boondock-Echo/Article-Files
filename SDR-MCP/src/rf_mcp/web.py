@@ -21,6 +21,7 @@ ASGIApp = Callable[[dict, Callable, Callable], Awaitable[None]]
 _ARTIFACT_PATH = re.compile(r"^/artifacts/(?P<artifact_id>art-[0-9a-f]+)$")
 _SSTV_IMAGE_PATH = re.compile(r"^/sstv-images/(?P<image_id>[A-Za-z0-9_-]+)$")
 _SESSION_SECONDS = 12 * 60 * 60
+_WATERFALL_FIRST_ROW_TIMEOUT_SECONDS = 10.0
 
 
 def validate_api_token(token: str | None) -> str | None:
@@ -549,17 +550,32 @@ class RfWebApp:
         metric["first_body_send_monotonic"] = time.monotonic()
         metric["first_body_send_ms"] = round((metric["first_body_send_monotonic"]-request_started)*1000, 3)
         try:
+            first_row_deadline = time.monotonic() + _WATERFALL_FIRST_ROW_TIMEOUT_SECONDS
             while True:
                 row_task = asyncio.create_task(asyncio.to_thread(subscription.rows.get))
                 disconnect_task = asyncio.create_task(receive())
-                done, pending = await asyncio.wait((row_task, disconnect_task), return_when=asyncio.FIRST_COMPLETED)
+                timeout = (max(0, first_row_deadline-time.monotonic())
+                           if metric["first_row_send_monotonic"] is None else None)
+                done, pending = await asyncio.wait((row_task, disconnect_task), timeout=timeout,
+                                                   return_when=asyncio.FIRST_COMPLETED)
                 for task in pending: task.cancel()
+                if not done:
+                    sessions = self.live_waterfall.status().get("sessions", [])
+                    current = next((item for item in sessions if item.get("session_id") ==
+                                    getattr(subscription, "session_id", None)), {})
+                    await send({"type": "http.response.body", "body": _json_bytes({
+                        "type": "error", "error": "first_row_timeout",
+                        "session_id": getattr(subscription, "session_id", None),
+                        "state": current.get("state", "starting"),
+                        "receiver_error": current.get("error"),
+                    }), "more_body": True})
+                    break
                 if disconnect_task in done and disconnect_task.result().get("type") == "http.disconnect": break
                 if row_task not in done: continue
                 frame = row_task.result()
                 if frame is None: break
                 await send({"type": "http.response.body", "body": _json_bytes(frame), "more_body": True})
-                if metric["first_row_send_monotonic"] is None:
+                if frame.get("type", "row") == "row" and metric["first_row_send_monotonic"] is None:
                     metric["first_row_send_monotonic"] = time.monotonic()
                     metric["first_row_send_ms"] = round((metric["first_row_send_monotonic"]-request_started)*1000, 3)
         finally:

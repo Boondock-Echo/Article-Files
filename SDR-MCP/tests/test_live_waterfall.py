@@ -65,6 +65,10 @@ def test_auto_receiver_policy_is_resolved_before_iq_subscription(monkeypatch):
     subscription = manager.subscribe(settings(receiver_id='auto'))
     assert subscribed == {'frequency_hz': 10_000_000, 'receiver_id': 'idle-waterfall'}
     assert manager.status()['sessions'][0]['receiver_id'] == 'idle-waterfall'
+    metadata = subscription.rows.get(timeout=2)
+    assert metadata['type'] == 'metadata' and metadata['state'] == 'starting'
+    terminal = subscription.rows.get(timeout=2)
+    assert terminal['type'] == 'terminal' and terminal['state'] == 'completed'
     assert subscription.rows.get(timeout=2) is None
 
 
@@ -94,8 +98,14 @@ def test_producer_closes_iq_generator_and_uses_no_artifact_api(monkeypatch):
         if hasattr(__import__('rf_mcp.receiver_backend', fromlist=[name]), name):
             monkeypatch.setattr('rf_mcp.receiver_backend.' + name, lambda *a, **k: pytest.fail(name))
     manager = LiveWaterfallManager(); subscription = manager.subscribe(settings())
-    frame = subscription.rows.get(timeout=2)
+    frames = []
+    while True:
+        frame = subscription.rows.get(timeout=2)
+        if frame is None or frame.get('type') == 'row': break
+        frames.append(frame)
+    assert frames[0]['type'] == 'metadata'
     assert frame['encoding'] == 'base64' and frame['bin_count'] == 128
+    assert subscription.rows.get(timeout=2)['type'] == 'terminal'
     assert subscription.rows.get(timeout=2) is None
     assert closed.wait(1)
     assert manager.status()['history'][0]['termination_reason'] == 'duration_limit'
