@@ -1184,6 +1184,23 @@ def test_dashboard_frequency_controls_share_memory_recall_and_integer_hz_payload
     assert "outside the selected receiver’s supported range" in script
 
 
+def test_home_function_presets_populate_capture_and_waterfall_fields():
+    script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'id="functionBand"' in script
+    assert 'id="functionChoice"' in script
+    assert "function applyFunctionPreset()" in script
+    assert "selectedFunctionFrequency(profile,band)" in script
+    assert "['frequency','audioFrequency','waterfallFrequency','digitalFrequency']" in script
+    assert "el('fft').value=String(profile.fft)" in script
+    assert "el('audioBandwidth').value=profile.bandwidthHz" in script
+    assert "el('waterfallSpan').value=profile.spanKhz" in script
+    assert "ft8:{family:'weak',mode:'ft8'" in script
+    assert "['10 m',28.074]" in script
+
+
 def test_dashboard_waterfall_scrolls_in_device_pixels_without_scaling_old_rows():
     script = resources.files("rf_mcp").joinpath("assets/dashboard.js").read_text(
         encoding="utf-8"
